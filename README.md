@@ -83,6 +83,8 @@ Your certificates will be saved as:
 
 The server will start on `https://localhost:9601` by default.  
 If accessed from another machine on your network, use your server's local IP address instead of `localhost`.
+> [!NOTE]
+> You will want to append a port on `CORS(app, origins=["http://localhost"])` to match your local development server.
 
 ## API Endpoints
 
