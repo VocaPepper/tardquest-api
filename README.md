@@ -81,7 +81,8 @@ Your certificates will be saved as:
    python TardQuest_API.py
    ```
 
-The server will start on `https://0.0.0.0:9601`
+The server will start on `https://localhost:9601` by default.  
+If accessed from another machine on your network, use your server's local IP address instead of `localhost`.
 
 ## API Endpoints
 
