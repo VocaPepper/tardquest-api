@@ -30,6 +30,8 @@ A Flask-based REST API server for [TardQuest](https://github.com/packardbell95/t
    TURNSTILE_SECRET=your_turnstile_secret_here
    TARDQUEST_ABUSE_KEY=your_admin_key_here
    ```
+> [!NOTE]
+> hCaptcha will be completely removed in the future, as only [tardboard-legacy.js](https://vocapepper.com/tardquest/mods) requires it.
 
 ## SSL Certificate Setup
 
