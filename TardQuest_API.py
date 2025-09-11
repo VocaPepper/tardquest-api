@@ -1,0 +1,718 @@
+# Import necessary modules for Flask API, CORS, rate limiting, JSON handling, file operations, UUID generation, regex, HTTP requests, datetime, unicode normalization, and environment variables
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+import json
+import os
+import uuid
+import re
+import requests
+from datetime import datetime, timedelta
+import unicodedata
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Initialize Flask application
+app = Flask(__name__)
+# Enable CORS for specified origins to allow cross-origin requests
+CORS(app, origins=["http://localhost"])
+
+# Define file paths for data storage
+LEADERBOARD_FILE = os.path.join(os.path.dirname(__file__), "tardboard.json")
+SESSIONS_FILE = os.path.join(os.path.dirname(__file__), "sessions.json")
+PIGEON_FILE = os.path.join(os.path.dirname(__file__), "pigeons.json")
+ABUSE_FILE = os.path.join(os.path.dirname(__file__), "abuse_events.json")
+
+# Initialize leaderboard and pigeon files if they do not exist
+if not os.path.exists(LEADERBOARD_FILE):
+    with open(LEADERBOARD_FILE, 'w') as f:
+        json.dump([], f)
+if not os.path.exists(PIGEON_FILE):
+    with open(PIGEON_FILE, "w", encoding="utf-8") as f:
+        json.dump([], f)
+if not os.path.exists(ABUSE_FILE):
+    with open(ABUSE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"events": [], "flagged": {}}, f)
+
+# Session management helper functions
+
+# Load sessions from file
+def load_sessions():
+    if not os.path.exists(SESSIONS_FILE):
+        with open(SESSIONS_FILE, 'w') as f:
+            json.dump({}, f)
+    with open(SESSIONS_FILE, 'r') as f:
+        return json.load(f)
+
+# Save sessions to file with debug print
+def save_sessions(sessions):
+    print("DEBUG: Saving sessions:", sessions)
+    with open(SESSIONS_FILE, 'w') as f:
+        json.dump(sessions, f, indent=2)
+
+# Load pigeons from file
+def load_pigeons():
+    with open(PIGEON_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+# Save pigeons to file
+def save_pigeons(pigeons):
+    with open(PIGEON_FILE, "w", encoding="utf-8") as f:
+        json.dump(pigeons, f, indent=2)
+
+# Get pending (undelivered) pigeons
+def _pending_pigeons(pigeons):
+    return [p for p in pigeons if not p.get("delivered")]
+
+# Session timeout in minutes
+SESSION_TIMEOUT_MINUTES = 120 # 2 hours timeout for sessions (resets on vocaguard update)
+
+# Configuration for pigeon message sanitation
+
+# Regex pattern for allowed characters in messages
+ALLOWED_CHARS_PATTERN = re.compile(r"[^A-Za-z0-9 .,!?;:'\-_/()\[\]@#%&*+=$\\\"]+")
+
+# Maximum length for pigeon messages
+MAX_PIGEON_MESSAGE_LEN = 420
+# Maximum pigeons per session
+MAX_PIGEONS_PER_SESSION = 20  # hard cap beyond rate limit
+# Rate limit for pigeon purchases
+PIGEON_RATE_LIMIT = "20 per hour"  # purchase spam guard
+
+# Configuration for abuse monitoring
+
+# Time window for abuse events in seconds
+ABUSE_EVENT_WINDOW_SECONDS = 3600  # 1 hour rolling window
+# Threshold for duplicate attempts
+ABUSE_DUPLICATE_THRESHOLD = 2
+# Threshold for sanitize rejections
+ABUSE_SANITIZE_REJECT_THRESHOLD = 2
+# Threshold for captcha failures
+ABUSE_CAPTCHA_FAIL_THRESHOLD = 2
+# Duration for abuse flag (ban) in seconds
+ABUSE_FLAG_DURATION_SECONDS = 3600 # 1 hour flag
+# Admin key for viewing abuse metrics
+ABUSE_ADMIN_KEY = os.environ.get("TARDQUEST_ABUSE_KEY")  # optional secret for viewing metrics
+
+# Load abuse state from file
+def _load_abuse_state():
+    with open(ABUSE_FILE, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+# Save abuse state to file
+def _save_abuse_state(state):
+    with open(ABUSE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(state, f, indent=2)
+
+# Prune old events and expired flags
+def _prune_events(state, now_ts):
+    cutoff = now_ts - ABUSE_EVENT_WINDOW_SECONDS
+    state['events'] = [e for e in state['events'] if e.get('ts', 0) >= cutoff]
+    # Remove expired flags
+    expired_ips = [ip for ip, info in state.get('flagged', {}).items() if info.get('until', 0) < now_ts]
+    for ip in expired_ips:
+        state['flagged'].pop(ip, None)
+
+# Record an abuse event
+def _record_abuse(metric: str, ip: str, session_id: str = None, extra: dict = None):
+    try:
+        state = _load_abuse_state()
+        now_ts = int(datetime.utcnow().timestamp())
+        _prune_events(state, now_ts)
+        event = {
+            'ts': now_ts,
+            'ip': ip,
+            'metric': metric
+        }
+        if session_id:
+            event['sid'] = session_id
+        if extra:
+            # avoid storing sensitive raw data
+            safe_extra = {k: (v if k != 'raw' else None) for k, v in extra.items()}
+            event['extra'] = safe_extra
+        state['events'].append(event)
+        # Recompute counts for this IP inside window
+        window_events = [e for e in state['events'] if e['ip'] == ip]
+        counts = {}
+        for e in window_events:
+            counts[e['metric']] = counts.get(e['metric'], 0) + 1
+        should_flag = (
+            counts.get('duplicate', 0) >= ABUSE_DUPLICATE_THRESHOLD or
+            counts.get('sanitize_reject', 0) >= ABUSE_SANITIZE_REJECT_THRESHOLD or
+            counts.get('captcha_fail', 0) >= ABUSE_CAPTCHA_FAIL_THRESHOLD
+        )
+        if should_flag:
+            state.setdefault('flagged', {})[ip] = {
+                'until': now_ts + ABUSE_FLAG_DURATION_SECONDS,
+                'counts': counts
+            }
+        _save_abuse_state(state)
+    except Exception as e:
+        # Fail open; do not break main flow
+        print(f"ABUSE RECORD ERROR: {e}")
+
+# Check if an IP is flagged for abuse
+def _is_flagged(ip: str):
+    try:
+        state = _load_abuse_state()
+        now_ts = int(datetime.utcnow().timestamp())
+        info = state.get('flagged', {}).get(ip)
+        if info and info.get('until', 0) > now_ts:
+            return True, info
+        return False, None
+    except Exception:
+        return False, None
+
+# Sanitize pigeon message content
+def sanitize_pigeon_message(raw: str) -> str:
+    if not isinstance(raw, str):
+        return ""
+    # Normalize unicode (NFC)
+    txt = unicodedata.normalize('NFC', raw)
+    # Remove HTML tags
+    txt = re.sub(r'<[^>]*>', '', txt)
+    # Remove control characters
+    txt = ''.join(ch for ch in txt if ch == '\n' or (ord(ch) >= 32 and ord(ch) != 127))
+    # Collapse whitespace
+    txt = re.sub(r'[ \t]+', ' ', txt)
+    txt = re.sub(r'\n{3,}', '\n\n', txt)  # limit blank lines
+    # Filter disallowed characters
+    txt = ALLOWED_CHARS_PATTERN.sub('', txt)
+    # Trim length
+    if len(txt) > MAX_PIGEON_MESSAGE_LEN:
+        txt = txt[:MAX_PIGEON_MESSAGE_LEN]
+    txt = txt.strip()
+    # Reduce repeated punctuation (e.g., !!!! -> !!)
+    txt = re.sub(r'([!?*.])\1{2,}', r'\1\1', txt)
+    # If resulting message is now too short or mostly punctuation, reject
+    if len(txt) < 3 or re.fullmatch(r'[.!?* ]+', txt):
+        return ""
+    return txt
+
+# Initialize rate limiter
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["100 per hour"]
+)
+
+# API Endpoints
+
+# Start a new anti-cheat session
+@app.route('/api/vocaguard/start', methods=['POST'])
+def vocaguard_start():
+    # Starts a new anti-cheat session and returns session_id
+    session_id = str(uuid.uuid4())
+    sessions = load_sessions()
+    expires = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
+    sessions[session_id] = _ensure_inventory({
+        "floor": 1,
+        "level": 1,
+        "expires": expires,
+        "created": datetime.utcnow().isoformat(),
+        "inv": {"carrierPigeon": 0}
+    })
+    save_sessions(sessions)
+
+    return jsonify({
+        "session_id": session_id,
+    }), 200
+
+# Update session progress with anti-cheat checks
+@app.route('/api/vocaguard/update', methods=['POST'])
+@limiter.limit("10 per minute")  # 10 updates per minute per IP
+def vocaguard_update():
+    # Updates session progress
+    data = request.get_json()
+    session_id = data.get('session_id')
+    floor = data.get('floor')
+    level = data.get('level')
+    sessions = load_sessions()
+    session = sessions.get(session_id)
+    if not session:
+        return jsonify({"error": "Invalid session token"}), 400
+    # Check expiration
+    if datetime.fromisoformat(session['expires']) < datetime.utcnow():
+        sessions.pop(session_id, None)
+        save_sessions(sessions)
+        return jsonify({"error": "Session expired"}), 400
+    current_floor = session['floor']
+    current_level = session['level']
+    # Floor cannot decrease
+    if floor < current_floor:
+        return jsonify({"error": "Floor regression detected", "detail": f"Current floor: {current_floor}, attempted: {floor}"}), 400
+    # Level cannot decrease on same floor
+    if floor == current_floor and level < current_level:
+        return jsonify({"error": "Level regression detected on same floor", "detail": f"Current level: {current_level}, attempted: {level}"}), 400
+    # Prevent skipping floors
+    if floor > current_floor and floor - current_floor > 1:
+        return jsonify({"error": "Abnormal floor jump detected", "detail": f"Current floor: {current_floor}, attempted: {floor}"}), 400
+    # Prevent abnormal level jumps (must increment by 1 or stay the same)
+    if level > current_level and level - current_level > 1 and floor == current_floor:
+        return jsonify({"error": "Abnormal level jump detected", "detail": f"Current level: {current_level}, attempted: {level}"}), 400
+    now = datetime.utcnow()
+    last_level_update = session.get('last_level_update')
+    last_floor_update = session.get('last_floor_update')
+
+    # Enforce minimum 10 seconds between level increments
+    if level > current_level:
+        if last_level_update:
+            last_level_update_dt = datetime.fromisoformat(last_level_update)
+            if (now - last_level_update_dt).total_seconds() < 10:
+                return jsonify({"error": "Level increment too fast!"}), 400
+        session['last_level_update'] = now.isoformat()
+
+    # Enforce minimum 10 seconds between floor increments
+    if floor > current_floor:
+        if last_floor_update:
+            last_floor_update_dt = datetime.fromisoformat(last_floor_update)
+            if (now - last_floor_update_dt).total_seconds() < 10:
+                return jsonify({"error": "Floor increment too fast!"}), 400
+        session['last_floor_update'] = now.isoformat()
+
+    # Update session progress only if valid
+    session['floor'] = floor
+    session['level'] = level
+    session['expires'] = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
+    sessions[session_id] = session
+    save_sessions(sessions)
+
+    return jsonify({
+        "status": "updated",
+    }, 200)
+
+# Validate final submission before leaderboard post
+@app.route('/api/vocaguard/validate', methods=['POST'])
+def vocaguard_validate():
+    # Validates final submission before leaderboard post
+    data = request.get_json()
+    session_id = data.get('session_id')
+    floor = data.get('floor')
+    level = data.get('level')
+    sessions = load_sessions()
+    session = sessions.get(session_id)
+    if not session:
+        return jsonify({"result": "fail", "reason": "Invalid session"}), 400
+    if datetime.fromisoformat(session['expires']) < datetime.utcnow():
+        sessions.pop(session_id, None)
+        save_sessions(sessions)
+        return jsonify({"result": "fail", "reason": "Session expired"}), 400
+    if session['floor'] == floor and session['level'] == level:
+        # Do NOT pop or save sessions here!
+        return jsonify({"result": "pass"}), 200
+    else:
+        return jsonify({"result": "fail", "reason": "Mismatch with tracked progress"}), 400
+
+# Get API status
+@app.route('/api/leaderboard/status', methods=['GET'])
+def leaderboard_status():
+    # Returns API status
+    return jsonify({"status": "ok"}), 200
+
+# Handle leaderboard GET and POST requests
+@app.route('/api/leaderboard', methods=['GET', 'POST'])
+def leaderboard():
+    # GET: Return the current leaderboard
+    if request.method == 'GET':
+        try:
+            with open(LEADERBOARD_FILE, 'r') as f:
+                leaderboard_data = json.load(f)
+            leaderboard_data = clean_json(leaderboard_data)
+            for entry in leaderboard_data:
+                if isinstance(entry, dict) and 'name' in entry and isinstance(entry['name'], str):
+                    entry['name'] = entry['name'].upper()
+            return jsonify(leaderboard_data)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    # POST: Update the leaderboard
+    elif request.method == 'POST':
+        try:
+            new_entry = request.get_json()
+            print("DEBUG: Received entry:", new_entry)
+            if not new_entry or not isinstance(new_entry, dict):
+                log_rejection("Invalid data format", new_entry)
+                return jsonify({"error": "Invalid data format"}), 400
+            # Core required fields (captcha token handled separately for backward compatibility)
+            required_fields = ['name', 'floor', 'level', 'session_id']
+            if not all(field in new_entry for field in required_fields):
+                log_rejection("Missing required core fields", new_entry)
+                return jsonify({"error": f"Missing required fields: {required_fields}"}), 400
+            # Accept multiple possible captcha token keys: legacy 'hcaptcha_token', generic 'captcha_token'
+            captcha_token = (
+                new_entry.get('captcha_token') or
+                new_entry.get('hcaptcha_token')
+            )
+            if not captcha_token:
+                log_rejection("Captcha token missing", new_entry)
+                return jsonify({"error": "Captcha token missing"}), 400
+            if not verify_any_captcha(captcha_token, remote_ip=request.remote_addr):
+                log_rejection("Captcha verification failed", new_entry)
+                return jsonify({"error": "Captcha verification failed"}), 400
+            raw_name = new_entry['name']
+            filtered_name = re.sub(r'<.*?>', '', raw_name).strip()
+            def clean_html(val):
+                if isinstance(val, str):
+                    val = re.sub(r'<.*?>', '', val)
+                    val = re.sub(r'(script|meta|iframe|onerror|onload|javascript:|http-equiv|src|href|alert|document|window)', '', val, flags=re.IGNORECASE)
+                    val = val.strip()
+                    val = val[:5]
+                    val = re.sub(r'[^A-Za-z0-9 ]', '', val)
+                    return val
+                return val
+            new_entry['name'] = clean_html(new_entry['name'])
+            filtered_name = new_entry['name']
+            if not filtered_name:
+                log_rejection("Name is required and must be valid", new_entry)
+                return jsonify({"error": "Name is required and must be valid"}), 400
+            if re.search(r'[^A-Za-z0-9 ]', filtered_name):
+                log_rejection("Name contains invalid characters", new_entry)
+                return jsonify({"error": "Name contains invalid characters"}), 400
+            if len(filtered_name) > 5:
+                log_rejection("Name must be at most 5 characters", new_entry)
+                return jsonify({"error": "Name must be at most 5 characters"}), 400
+            new_entry['name'] = filtered_name
+            try:
+                floor_val = int(new_entry['floor'])
+                level_val = int(new_entry['level'])
+            except (ValueError, TypeError):
+                log_rejection("Floor and level must be valid numbers", new_entry)
+                return jsonify({"error": "Floor and level must be valid numbers"}), 400
+            new_entry['floor'] = floor_val
+            new_entry['level'] = level_val
+            sessions = load_sessions()
+            session = sessions.get(new_entry['session_id'])
+            if not session:
+                log_rejection("VocaGuard session missing or invalid", new_entry)
+                return jsonify({"error": "VocaGuard session missing or invalid"}), 400
+            if datetime.fromisoformat(session['expires']) < datetime.utcnow():
+                log_rejection("VocaGuard session expired", new_entry)
+                sessions.pop(new_entry['session_id'], None)
+                save_sessions(sessions)
+                return jsonify({"error": "VocaGuard session expired"}), 400
+            if session['floor'] != new_entry['floor'] or session['level'] != new_entry['level']:
+                log_rejection("VocaGuard progress mismatch", new_entry)
+                return jsonify({"error": "VocaGuard progress mismatch"}), 400
+            sessions.pop(new_entry['session_id'], None)
+            save_sessions(sessions)
+            with open(LEADERBOARD_FILE, 'r') as f:
+                leaderboard_data = json.load(f)
+            # Drop session & any captcha token fields before storing
+            entry_to_store = {k: v for k, v in new_entry.items() if k not in ('session_id', 'hcaptcha_token', 'captcha_token')}
+            leaderboard_data.append(entry_to_store)
+            leaderboard_data.sort(key=lambda x: (x['floor'], x['level']), reverse=True)
+            with open(LEADERBOARD_FILE, 'w') as f:
+                json.dump(leaderboard_data, f, indent=2)
+            return jsonify({"message": "Leaderboard updated successfully", "data": leaderboard_data})
+        except Exception as e:
+            print("DEBUG: Exception occurred:", e)
+            return jsonify({"error": str(e)}), 500
+
+# Get carrier pigeon inventory for session
+@app.route('/api/pigeon/inventory', methods=['GET'])
+def pigeon_inventory():
+    session_id = request.args.get('session_id')
+    if not session_id:
+        return jsonify({"error": "session_id required"}), 400
+    # Abuse flag check
+    flagged, info = _is_flagged(request.remote_addr)
+    if flagged:
+        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}).copy(), 429
+    sessions = load_sessions()
+    session = sessions.get(session_id)
+    if not session:
+        return jsonify({"error": "Invalid session"}), 400
+    if datetime.fromisoformat(session["expires"]) < datetime.utcnow():
+        return jsonify({"error": "Session expired"}), 400
+    session = _ensure_inventory(session)
+    return jsonify({"carrierPigeon": session['inv']['carrierPigeon']}), 200
+
+# Purchase a carrier pigeon
+@app.route('/api/pigeon/purchase', methods=['POST'])
+@limiter.limit(PIGEON_RATE_LIMIT)
+def pigeon_purchase():
+    # Increments carrier pigeon inventory for this session.
+    data = request.get_json() or {}
+    session_id = data.get("session_id")
+    if not session_id:
+        return jsonify({"error": "session_id required"}), 400
+    flagged, info = _is_flagged(request.remote_addr)
+    if flagged:
+        _record_abuse('blocked_request', request.remote_addr, session_id)
+        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}).copy(), 429
+    sessions = load_sessions()
+    session = sessions.get(session_id)
+    if not session:
+        return jsonify({"error": "Invalid session"}), 400
+    if datetime.fromisoformat(session["expires"]) < datetime.utcnow():
+        return jsonify({"error": "Session expired"}), 400
+    session = _ensure_inventory(session)
+    cur = session['inv']['carrierPigeon']
+    if cur >= MAX_PIGEONS_PER_SESSION:
+        return jsonify({"error": "You've had enough pigeons for today!", "carrierPigeon": cur}), 400
+    session['inv']['carrierPigeon'] = cur + 1
+    # refresh expiry
+    session['expires'] = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
+    sessions[session_id] = session
+    save_sessions(sessions)
+    return jsonify({
+        "purchased": True,
+        "carrierPigeon": session['inv']['carrierPigeon'],
+        "remaining_capacity": MAX_PIGEONS_PER_SESSION - session['inv']['carrierPigeon']
+    }), 200
+
+# Send a pigeon message
+@app.route('/api/pigeon/send', methods=['POST'])
+@limiter.limit("5 per minute")
+def pigeon_send():
+    data = request.get_json() or {}
+    session_id = data.get("session_id")
+    raw_text = (data.get("message") or "").strip()
+
+    if not session_id or not raw_text:
+        return jsonify({"error": "session_id and message required"}), 400
+
+    flagged, info = _is_flagged(request.remote_addr)
+    if flagged:
+        _record_abuse('blocked_request', request.remote_addr, session_id)
+        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}).copy(), 429
+
+    sessions = load_sessions()
+    session = sessions.get(session_id)
+    if not session:
+        return jsonify({"error": "Invalid session"}), 400
+    if datetime.fromisoformat(session["expires"]) < datetime.utcnow():
+        return jsonify({"error": "Session expired"}), 400
+
+    session = _ensure_inventory(session)
+    if session['inv']['carrierPigeon'] <= 0:
+        _record_abuse('no_inventory', request.remote_addr, session_id)
+        return jsonify({"error": "No carrier pigeon in inventory"}), 400
+
+    text = sanitize_pigeon_message(raw_text)
+    if not text:
+        _record_abuse('sanitize_reject', request.remote_addr, session_id)
+        return jsonify({"error": "Message rejected (empty/invalid after sanitation)"}), 400
+
+    pigeons = load_pigeons()
+    # Treat missing delivered flag as undelivered
+    session_messages = [p for p in pigeons if p.get('from_session') == session_id]
+    if len(session_messages) >= MAX_PIGEONS_PER_SESSION:
+        _record_abuse('message_cap', request.remote_addr, session_id)
+        return jsonify({"error": "Session pigeon message limit reached"}), 429
+
+    last_same_session = next((p for p in reversed(pigeons) if p.get('from_session') == session_id), None)
+    if last_same_session and last_same_session.get('text') == text:
+        _record_abuse('duplicate', request.remote_addr, session_id)
+        return jsonify({"error": "Duplicate message"}), 400
+
+    session['inv']['carrierPigeon'] -= 1
+    sessions[session_id] = session
+    save_sessions(sessions)
+
+    pigeons.append({
+        "id": str(uuid.uuid4()),
+        "text": text,
+        "from_session": session_id,
+        "created": datetime.utcnow().isoformat(),
+        "delivered": False,
+        "delivered_at": None,
+        "delivered_to": None
+    })
+    save_pigeons(pigeons)
+
+    pending = len(_pending_pigeons(pigeons))
+
+    _record_abuse('message_sent', request.remote_addr, session_id)
+
+    return jsonify({
+        "stored": True,
+        "queue_length_pending": pending,
+        "queue_length_total": len(pigeons),
+        "sanitized_text": text,
+        "carrierPigeon_remaining": session['inv']['carrierPigeon']
+    }), 200
+
+# Deliver a pigeon message to session
+@app.route('/api/pigeon/delivery', methods=['POST'])
+@limiter.limit("5 per minute")
+def pigeon_delivery():
+    data = request.get_json() or {}
+    session_id = data.get('session_id')
+    if not session_id:
+        return jsonify({"error": "session_id required"}), 400
+    sessions = load_sessions()
+    session = sessions.get(session_id)
+    if not session:
+        return jsonify({"error": "Invalid session"}), 400
+    if datetime.fromisoformat(session["expires"]) < datetime.utcnow():
+        return jsonify({"error": "Session expired"}), 400
+
+    pigeons = load_pigeons()
+    delivered_msg = None
+    for p in pigeons:
+        if p.get('from_session') != session_id and not p.get('delivered'):
+            p['delivered'] = True
+            p['delivered_at'] = datetime.utcnow().isoformat()
+            p['delivered_to'] = session_id
+            delivered_msg = p
+            break
+    if delivered_msg:
+        save_pigeons(pigeons)
+
+    remaining_pending = len(_pending_pigeons(pigeons))
+    return jsonify({
+        "delivered": bool(delivered_msg),
+        "pigeon_message": delivered_msg["text"] if delivered_msg else None,
+        "pigeon_id": delivered_msg["id"] if delivered_msg else None,
+        "remaining_queue_pending": remaining_pending,
+        "remaining_queue_total": len(pigeons)
+    }), 200
+
+# Get abuse status (admin only)
+@app.route('/api/abuse/status', methods=['GET'])
+def abuse_status():
+    # Optional admin endpoint
+    if not ABUSE_ADMIN_KEY:
+        return jsonify({"error": "Disabled"}), 404
+    key = request.args.get('key')
+    if key != ABUSE_ADMIN_KEY:
+        return jsonify({"error": "Forbidden"}), 403
+    try:
+        state = _load_abuse_state()
+        now_ts = int(datetime.utcnow().timestamp())
+        _prune_events(state, now_ts)
+        # Aggregate counts per IP (exclude raw extras)
+        agg = {}
+        for e in state['events']:
+            ip = e['ip']
+            metric = e['metric']
+            agg.setdefault(ip, {})[metric] = agg.setdefault(ip, {}).get(metric, 0) + 1
+        return jsonify({
+            'flagged': state.get('flagged', {}),
+            'counts': agg,
+            'window_seconds': ABUSE_EVENT_WINDOW_SECONDS
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Utility Functions
+
+# Get hCaptcha secret from environment
+HCAPTCHA_SECRET = os.environ.get("HCAPTCHA_SECRET", "")
+# Get Turnstile secret from environment
+TURNSTILE_SECRET = os.environ.get("TURNSTILE_SECRET", "")
+
+# Verify hCaptcha token
+def verify_hcaptcha(token: str) -> bool:
+    if not token:
+        return False
+    url = "https://hcaptcha.com/siteverify"
+    data = {"secret": HCAPTCHA_SECRET, "response": token}
+    try:
+        resp = requests.post(url, data=data, timeout=5)
+        result = resp.json()
+        return bool(result.get("success"))
+    except Exception as e:
+        print(f"hCaptcha verification error: {e}")
+        return False
+
+# Verify Cloudflare Turnstile token
+def verify_turnstile(token: str, remote_ip: str = None) -> bool:
+    if not token or not TURNSTILE_SECRET:
+        return False
+    url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+    data = {"secret": TURNSTILE_SECRET, "response": token}
+    if remote_ip:
+        data["remoteip"] = remote_ip
+    try:
+        resp = requests.post(url, data=data, timeout=5)
+        result = resp.json()
+        return bool(result.get("success"))
+    except Exception as e:
+        print(f"Turnstile verification error: {e}")
+        return False
+
+# Verify captcha using either hCaptcha or Turnstile
+def verify_any_captcha(token: str, remote_ip: str = None) -> bool:
+    # Try hCaptcha (legacy) first; if fails, attempt Turnstile if configured
+    if verify_hcaptcha(token):
+        return True
+    return verify_turnstile(token, remote_ip=remote_ip)
+
+# Clean HTML and scripts from string, enforce 5 char limit
+def clean_html(val):
+    # Cleans HTML/script from string and enforces 5 char limit
+    if isinstance(val, str):
+        val = re.sub(r'<.*?>', '', val)
+        val = re.sub(r'(script|meta|iframe|onerror|onload|javascript:|http-equiv|src|href|alert|document|window)', '', val, flags=re.IGNORECASE)
+        val = val.strip()
+        val = val[:5]
+        val = re.sub(r'[^A-Za-z0-9 ]', '', val)
+        return val
+    return val
+
+# Recursively clean JSON data
+def clean_json(obj):
+    # Recursively clean leaderboard JSON
+    if isinstance(obj, dict):
+        return {k: clean_html(v) if k == 'name' else clean_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_json(item) for item in obj]
+    else:
+        return obj
+
+# Log rejection reason to file
+def log_rejection(reason, data):
+    # Append rejection event into abuse tracking file
+    try:
+        state = _load_abuse_state()
+        now_ts = int(datetime.utcnow().timestamp())
+        _prune_events(state, now_ts)
+        event = {
+            'ts': now_ts,
+            'ip': request.remote_addr,
+            'metric': 'rejection',
+            'reason': reason,
+            'ua': request.headers.get('User-Agent'),
+            'data_excerpt': {
+                'name': (data.get('name') if isinstance(data, dict) else None),
+                'floor': (data.get('floor') if isinstance(data, dict) else None),
+                'level': (data.get('level') if isinstance(data, dict) else None)
+            }
+        }
+        state['events'].append(event)
+        # Count captcha failures separately for flagging
+        if reason.lower().startswith('captcha'):
+            # Recompute counts for this IP to decide flagging
+            ip = request.remote_addr
+            window_events = [e for e in state['events'] if e.get('ip') == ip]
+            captcha_fails = sum(1 for e in window_events if (e.get('metric') == 'rejection' and str(e.get('reason','')).lower().startswith('captcha')))
+            if captcha_fails >= ABUSE_CAPTCHA_FAIL_THRESHOLD:
+                state.setdefault('flagged', {})[ip] = {
+                    'until': now_ts + ABUSE_FLAG_DURATION_SECONDS,
+                    'counts': {'captcha_fail': captcha_fails}
+                }
+        _save_abuse_state(state)
+    except Exception as e:
+        print(f"LOG REJECTION ERROR: {e}")
+
+# Ensure session has inventory structure
+def _ensure_inventory(session: dict):
+    if 'inv' not in session or not isinstance(session['inv'], dict):
+        session['inv'] = {}
+    if 'carrierPigeon' not in session['inv']:
+        session['inv']['carrierPigeon'] = 0
+    return session
+
+# Main entry point to run the Flask app
+if __name__ == '__main__':
+    # Use SSL context for HTTPS
+    app.run(
+        debug=False,
+        host='0.0.0.0',
+        port=9601,
+        ssl_context=('ssl/certificate.pem', 'ssl/priv-key.pem')
+    )
