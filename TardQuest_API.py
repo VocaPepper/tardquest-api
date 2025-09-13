@@ -13,6 +13,8 @@ import unicodedata
 from dotenv import load_dotenv
 import random  # weighted selection jitter
 import sqlite3  # SQLite database
+import threading # for background tasks
+import time # for sleep in background tasks
 
 # Load environment variables from .env file
 load_dotenv()
@@ -282,7 +284,7 @@ def _save_abuse_state(state):
                 int(e.get('ts', 0)),
                 str(e.get('ip', '')),
                 str(e.get('metric', '')),
-                e.get('sid'),
+                str(e.get('sid', '')),
                 json.dumps(e.get('extra', {})),
             )
         )
@@ -994,12 +996,46 @@ def _select_pigeon_for_delivery(pigeons: list, recipient_session: dict, sessions
     pick = random.choices(population=pool, weights=weights, k=1)[0]
     return pick[0], pick[1]
 
+# Purge old sessions
+def purge_old_sessions():
+    # Delete sessions older than 30 days
+    cutoff = (datetime.utcnow() - timedelta(days=30)).isoformat()
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM sessions WHERE created < ?", (cutoff,))
+    conn.commit()
+    conn.close()
+
+def session_purge_worker():
+    # Background thread to purge old sessions every 24 hours
+    while True:
+        try:
+            purge_old_sessions()
+        except Exception as e:
+            print(f"Session purge error: {e}")
+        time.sleep(24 * 60 * 60)  # Sleep for 24 hours
+
+# Start the purge thread when the app starts
+purge_thread = threading.Thread(target=session_purge_worker, daemon=True)
+purge_thread.start()
+
 # Main entry point to run the Flask app
 if __name__ == '__main__':
-    # Use SSL context for HTTPS
+    # Check if SSL certificates are available
+    cert_path = os.path.join(os.path.dirname(__file__), 'ssl', 'certificate.pem')
+    key_path = os.path.join(os.path.dirname(__file__), 'ssl', 'priv-key.pem')
+    
+    if os.path.exists(cert_path) and os.path.exists(key_path):
+        ssl_context = (cert_path, key_path)
+        print("SSL certificates found. Running with HTTPS.")
+    else:
+        ssl_context = None
+        print("WARNING: SSL certificates not found. Falling back to HTTP. This is insecure and should only be used for development.")
+    
+    # Use SSL context for HTTPS if available, otherwise HTTP
     app.run(
         debug=False,
         host='0.0.0.0',
         port=9601,
-        ssl_context=('ssl/certificate.pem', 'ssl/priv-key.pem')
+        ssl_context=ssl_context
     )
