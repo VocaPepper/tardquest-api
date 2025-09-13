@@ -1,4 +1,4 @@
-# Import necessary modules for Flask API, CORS, rate limiting, JSON handling, file operations, UUID generation, regex, HTTP requests, datetime, unicode normalization, and environment variables
+# Import necessary modules for Flask API, CORS, rate limiting, file operations, UUID generation, regex, HTTP requests, datetime, unicode normalization, environment variables, random, and SQLite database support
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_limiter import Limiter
@@ -11,6 +11,8 @@ import requests
 from datetime import datetime, timedelta
 import unicodedata
 from dotenv import load_dotenv
+import random  # weighted selection jitter
+import sqlite3  # SQLite database
 
 # Load environment variables from .env file
 load_dotenv()
@@ -18,50 +20,185 @@ load_dotenv()
 # Initialize Flask application
 app = Flask(__name__)
 # Enable CORS for specified origins to allow cross-origin requests
-CORS(app, origins=["http://localhost"])
+CORS(app, origins=["http://localhost:5500", "http://localhost:9599", "https://vocapepper.com", "https://milklounge.wang"])
+# 5500: Used for local development, change as needed
+# 9599: Used for Electron app in production
 
-# Define file paths for data storage
-LEADERBOARD_FILE = os.path.join(os.path.dirname(__file__), "tardboard.json")
-SESSIONS_FILE = os.path.join(os.path.dirname(__file__), "sessions.json")
-PIGEON_FILE = os.path.join(os.path.dirname(__file__), "pigeons.json")
-ABUSE_FILE = os.path.join(os.path.dirname(__file__), "abuse_events.json")
+# --- SQLite setup ---
+# Single DB file for all data
+DB_FILE = os.path.join(os.path.dirname(__file__), "tardquest.db")
 
-# Initialize leaderboard and pigeon files if they do not exist
-if not os.path.exists(LEADERBOARD_FILE):
-    with open(LEADERBOARD_FILE, 'w') as f:
-        json.dump([], f)
-if not os.path.exists(PIGEON_FILE):
-    with open(PIGEON_FILE, "w", encoding="utf-8") as f:
-        json.dump([], f)
-if not os.path.exists(ABUSE_FILE):
-    with open(ABUSE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"events": [], "flagged": {}}, f)
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS leaderboard (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            floor INTEGER NOT NULL,
+            level INTEGER NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sessions (
+            session_id TEXT PRIMARY KEY,
+            floor INTEGER NOT NULL,
+            level INTEGER NOT NULL,
+            expires TEXT NOT NULL,
+            created TEXT NOT NULL,
+            inv TEXT NOT NULL,
+            last_level_update TEXT,
+            last_floor_update TEXT,
+            last_message_received_at TEXT,
+            last_from_session_delivered TEXT,
+            verified INTEGER DEFAULT 0
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pigeons (
+            id TEXT PRIMARY KEY,
+            text TEXT NOT NULL,
+            from_session TEXT NOT NULL,
+            from_floor INTEGER NOT NULL,
+            from_level INTEGER NOT NULL,
+            from_verified INTEGER NOT NULL,
+            created TEXT NOT NULL,
+            delivered INTEGER DEFAULT 0,
+            delivered_at TEXT,
+            delivered_to TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS abuse_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            ip TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            sid TEXT,
+            extra TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS abuse_flagged (
+            ip TEXT PRIMARY KEY,
+            until INTEGER NOT NULL,
+            counts TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+# Initialize DB
+init_db()
 
 # Session management helper functions
 
 # Load sessions from file
 def load_sessions():
-    if not os.path.exists(SESSIONS_FILE):
-        with open(SESSIONS_FILE, 'w') as f:
-            json.dump({}, f)
-    with open(SESSIONS_FILE, 'r') as f:
-        return json.load(f)
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute('SELECT session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified FROM sessions')
+    rows = cur.fetchall()
+    conn.close()
+    sessions = {}
+    for r in rows:
+        sessions[r[0]] = {
+            'floor': int(r[1]),
+            'level': int(r[2]),
+            'expires': r[3],
+            'created': r[4],
+            'inv': (json.loads(r[5]) if r[5] else {}),
+            'last_level_update': r[6],
+            'last_floor_update': r[7],
+            'last_message_received_at': r[8],
+            'last_from_session_delivered': r[9],
+            'verified': bool(r[10])
+        }
+    return sessions
 
 # Save sessions to file with debug print
 def save_sessions(sessions):
-    print("DEBUG: Saving sessions:", sessions)
-    with open(SESSIONS_FILE, 'w') as f:
-        json.dump(sessions, f, indent=2)
+    # Replace-all approach keeps the rest of the code unchanged
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute('DELETE FROM sessions')
+    for sid, s in sessions.items():
+        cur.execute(
+            'INSERT OR REPLACE INTO sessions (session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (
+                sid,
+                int(s.get('floor', 1)),
+                int(s.get('level', 1)),
+                s.get('expires', ''),
+                s.get('created', ''),
+                json.dumps(s.get('inv', {})),
+                s.get('last_level_update'),
+                s.get('last_floor_update'),
+                s.get('last_message_received_at'),
+                s.get('last_from_session_delivered'),
+                1 if s.get('verified') else 0,
+            )
+        )
+    conn.commit()
+    conn.close()
 
 # Load pigeons from file
 def load_pigeons():
-    with open(PIGEON_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    # Preserve append order by created timestamp
+    cur.execute('SELECT id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to FROM pigeons ORDER BY datetime(created) ASC')
+    rows = cur.fetchall()
+    conn.close()
+    pigeons = []
+    for r in rows:
+        pigeons.append({
+            'id': r[0],
+            'text': r[1],
+            'from_session': r[2],
+            'from_floor': int(r[3]),
+            'from_level': int(r[4]),
+            'from_verified': bool(r[5]),
+            'created': r[6],
+            'delivered': bool(r[7]),
+            'delivered_at': r[8],
+            'delivered_to': r[9],
+        })
+    return pigeons
 
 # Save pigeons to file
 def save_pigeons(pigeons):
-    with open(PIGEON_FILE, "w", encoding="utf-8") as f:
-        json.dump(pigeons, f, indent=2)
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute('DELETE FROM pigeons')
+    for p in pigeons:
+        cur.execute(
+            'INSERT OR REPLACE INTO pigeons (id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (
+                p.get('id') or str(uuid.uuid4()),
+                p.get('text', ''),
+                p.get('from_session', ''),
+                int(p.get('from_floor', 0)),
+                int(p.get('from_level', 0)),
+                1 if p.get('from_verified') else 0,
+                p.get('created', datetime.utcnow().isoformat()),
+                1 if p.get('delivered') else 0,
+                p.get('delivered_at'),
+                p.get('delivered_to'),
+            )
+        )
+    conn.commit()
+    conn.close()
 
 # Get pending (undelivered) pigeons
 def _pending_pigeons(pigeons):
@@ -82,6 +219,16 @@ MAX_PIGEONS_PER_SESSION = 20  # hard cap beyond rate limit
 # Rate limit for pigeon purchases
 PIGEON_RATE_LIMIT = "20 per hour"  # purchase spam guard
 
+# Delivery prioritization config
+FLOOR_PROXIMITY_RANGE = 2               # preferred ±2 floors
+PRIORITY_HIGH_FLOOR_WEIGHT = 0.05       # +5% weight per sender floor
+PRIORITY_VERIFIED_MULTIPLIER = 1.5      # 50% boost for verified sender sessions
+AGE_BOOST_FULL_SECONDS = 600            # full age boost after 10 minutes
+AGE_BOOST_MAX = 0.5                     # up to +50% boost for older messages
+RANDOM_JITTER_MIN = 0.85                # randomness factor range
+RANDOM_JITTER_MAX = 1.15
+REPEAT_SENDER_PENALTY = 0.5             # de-prioritize same sender consecutively
+
 # Configuration for abuse monitoring
 
 # Time window for abuse events in seconds
@@ -99,13 +246,54 @@ ABUSE_ADMIN_KEY = os.environ.get("TARDQUEST_ABUSE_KEY")  # optional secret for v
 
 # Load abuse state from file
 def _load_abuse_state():
-    with open(ABUSE_FILE, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    # Events
+    cur.execute('SELECT ts, ip, metric, sid, extra FROM abuse_events')
+    events = []
+    for ts, ip, metric, sid, extra in cur.fetchall():
+        events.append({
+            'ts': int(ts),
+            'ip': ip,
+            'metric': metric,
+            'sid': sid,
+            'extra': (json.loads(extra) if extra else {}),
+        })
+    # Flagged
+    cur.execute('SELECT ip, until, counts FROM abuse_flagged')
+    flagged = {}
+    for ip, until, counts in cur.fetchall():
+        flagged[ip] = {
+            'until': int(until),
+            'counts': (json.loads(counts) if counts else {}),
+        }
+    conn.close()
+    return {'events': events, 'flagged': flagged}
 
 # Save abuse state to file
 def _save_abuse_state(state):
-    with open(ABUSE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(state, f, indent=2)
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute('DELETE FROM abuse_events')
+    for e in state.get('events', []):
+        cur.execute(
+            'INSERT INTO abuse_events (ts, ip, metric, sid, extra) VALUES (?, ?, ?, ?, ?)',
+            (
+                int(e.get('ts', 0)),
+                str(e.get('ip', '')),
+                str(e.get('metric', '')),
+                e.get('sid'),
+                json.dumps(e.get('extra', {})),
+            )
+        )
+    cur.execute('DELETE FROM abuse_flagged')
+    for ip, info in (state.get('flagged', {}) or {}).items():
+        cur.execute(
+            'INSERT OR REPLACE INTO abuse_flagged (ip, until, counts) VALUES (?, ?, ?)',
+            (str(ip), int(info.get('until', 0)), json.dumps(info.get('counts', {})))
+        )
+    conn.commit()
+    conn.close()
 
 # Prune old events and expired flags
 def _prune_events(state, now_ts):
@@ -318,8 +506,15 @@ def leaderboard():
     # GET: Return the current leaderboard
     if request.method == 'GET':
         try:
-            with open(LEADERBOARD_FILE, 'r') as f:
-                leaderboard_data = json.load(f)
+            # Load from SQLite and sanitize like before
+            conn = sqlite3.connect(DB_FILE)
+            cur = conn.cursor()
+            cur.execute('SELECT name, floor, level FROM leaderboard ORDER BY floor DESC, level DESC')
+            leaderboard_data = [
+                {'name': r[0], 'floor': int(r[1]), 'level': int(r[2])}
+                for r in cur.fetchall()
+            ]
+            conn.close()
             leaderboard_data = clean_json(leaderboard_data)
             for entry in leaderboard_data:
                 if isinstance(entry, dict) and 'name' in entry and isinstance(entry['name'], str):
@@ -397,14 +592,21 @@ def leaderboard():
                 return jsonify({"error": "VocaGuard progress mismatch"}), 400
             sessions.pop(new_entry['session_id'], None)
             save_sessions(sessions)
-            with open(LEADERBOARD_FILE, 'r') as f:
-                leaderboard_data = json.load(f)
-            # Drop session & any captcha token fields before storing
+            # Insert into SQLite and return sorted list
             entry_to_store = {k: v for k, v in new_entry.items() if k not in ('session_id', 'hcaptcha_token', 'captcha_token')}
-            leaderboard_data.append(entry_to_store)
-            leaderboard_data.sort(key=lambda x: (x['floor'], x['level']), reverse=True)
-            with open(LEADERBOARD_FILE, 'w') as f:
-                json.dump(leaderboard_data, f, indent=2)
+            conn = sqlite3.connect(DB_FILE)
+            cur = conn.cursor()
+            cur.execute(
+                'INSERT INTO leaderboard (name, floor, level) VALUES (?, ?, ?)',
+                (entry_to_store['name'], int(entry_to_store['floor']), int(entry_to_store['level']))
+            )
+            conn.commit()
+            cur.execute('SELECT name, floor, level FROM leaderboard ORDER BY floor DESC, level DESC')
+            leaderboard_data = [
+                {'name': r[0], 'floor': int(r[1]), 'level': int(r[2])}
+                for r in cur.fetchall()
+            ]
+            conn.close()
             return jsonify({"message": "Leaderboard updated successfully", "data": leaderboard_data})
         except Exception as e:
             print("DEBUG: Exception occurred:", e)
@@ -516,6 +718,9 @@ def pigeon_send():
         "id": str(uuid.uuid4()),
         "text": text,
         "from_session": session_id,
+        "from_floor": int(session.get("floor", 0)),  # capture sender floor
+        "from_level": int(session.get("level", 0)),  # capture sender level
+        "from_verified": bool(session.get("verified", False)),  # capture sender verification
         "created": datetime.utcnow().isoformat(),
         "delivered": False,
         "delivered_at": None,
@@ -551,16 +756,19 @@ def pigeon_delivery():
         return jsonify({"error": "Session expired"}), 400
 
     pigeons = load_pigeons()
-    delivered_msg = None
-    for p in pigeons:
-        if p.get('from_session') != session_id and not p.get('delivered'):
-            p['delivered'] = True
-            p['delivered_at'] = datetime.utcnow().isoformat()
-            p['delivered_to'] = session_id
-            delivered_msg = p
-            break
-    if delivered_msg:
+    # select a message using weighted, progress-based matching
+    session["session_id"] = session_id  # help selector avoid self
+    sel_idx, delivered_msg = _select_pigeon_for_delivery(pigeons, session, sessions)
+    if delivered_msg is not None and sel_idx is not None:
+        pigeons[sel_idx]['delivered'] = True
+        pigeons[sel_idx]['delivered_at'] = datetime.utcnow().isoformat()
+        pigeons[sel_idx]['delivered_to'] = session_id
         save_pigeons(pigeons)
+        # store recipient's last sender to reduce repetition
+        session['last_message_received_at'] = datetime.utcnow().isoformat()
+        session['last_from_session_delivered'] = delivered_msg.get('from_session')
+        sessions[session_id] = session
+        save_sessions(sessions)
 
     remaining_pending = len(_pending_pigeons(pigeons))
     return jsonify({
@@ -706,6 +914,85 @@ def _ensure_inventory(session: dict):
     if 'carrierPigeon' not in session['inv']:
         session['inv']['carrierPigeon'] = 0
     return session
+
+# Resolve sender progress/verification for a message, using captured fields if present
+def _sender_progress_for_msg(msg: dict, sessions: dict):
+    from_floor = msg.get("from_floor")
+    from_level = msg.get("from_level")
+    from_verified = msg.get("from_verified", False)
+    if from_floor is None or from_level is None or msg.get("from_verified") is None:
+        sid = msg.get("from_session")
+        s = sessions.get(sid) if sid else None
+        if from_floor is None:
+            from_floor = (s.get("floor") if isinstance(s, dict) else 0) or 0
+        if from_level is None:
+            from_level = (s.get("level") if isinstance(s, dict) else 0) or 0
+        if msg.get("from_verified") is None:
+            from_verified = bool((s or {}).get("verified", False))
+    return int(from_floor or 0), int(from_level or 0), bool(from_verified)
+
+# Compute a 0..1 closeness factor within the preferred floor range
+def _closeness_weight(sender_floor: int, recipient_floor: int) -> float:
+    delta = abs(sender_floor - recipient_floor)
+    if delta > FLOOR_PROXIMITY_RANGE:
+        return 0.0
+    return max(0.0, 1.0 - (delta / (FLOOR_PROXIMITY_RANGE + 1)))
+
+# Age-based booster: up to +AGE_BOOST_MAX after AGE_BOOST_FULL_SECONDS
+def _age_boost(created_iso: str) -> float:
+    try:
+        created_dt = datetime.fromisoformat(created_iso)
+    except Exception:
+        return 0.0
+    age = (datetime.utcnow() - created_dt).total_seconds()
+    if age <= 0:
+        return 0.0
+    return min(AGE_BOOST_MAX, AGE_BOOST_MAX * (age / AGE_BOOST_FULL_SECONDS))
+
+# Compute composite weight for weighted-random selection
+def _message_weight(msg: dict, recipient_session: dict, sessions: dict) -> float:
+    sender_floor, sender_level, sender_verified = _sender_progress_for_msg(msg, sessions)
+    recipient_floor = int(recipient_session.get("floor", 0))
+    weight = 1.0
+    close = _closeness_weight(sender_floor, recipient_floor)
+    if close > 0:
+        weight *= (1.0 + 0.5 * close)  # up to +50% for same floor
+    weight *= (1.0 + PRIORITY_HIGH_FLOOR_WEIGHT * max(0, sender_floor))  # higher floors bias
+    if sender_verified:
+        weight *= PRIORITY_VERIFIED_MULTIPLIER  # verified sender boost
+    weight *= (1.0 + _age_boost(msg.get("created", "")))  # older messages bias
+    last_from = recipient_session.get("last_from_session_delivered")
+    if last_from and last_from == msg.get("from_session"):
+        weight *= REPEAT_SENDER_PENALTY  # avoid same sender twice in a row
+    weight *= random.uniform(RANDOM_JITTER_MIN, RANDOM_JITTER_MAX)  # jitter
+    return max(weight, 0.0)
+
+# Select an undelivered pigeon (not from recipient) using weighted random with proximity preference
+def _select_pigeon_for_delivery(pigeons: list, recipient_session: dict, sessions: dict):
+    session_id = recipient_session.get("id") or recipient_session.get("session_id")
+    all_candidates = []
+    close_candidates = []
+    rec_floor = int(recipient_session.get("floor", 0))
+    for idx, p in enumerate(pigeons):
+        if p.get("delivered"):
+            continue
+        if p.get("from_session") == session_id:
+            continue
+        all_candidates.append((idx, p))
+        s_floor, _, _ = _sender_progress_for_msg(p, sessions)
+        if abs(s_floor - rec_floor) <= FLOOR_PROXIMITY_RANGE:
+            close_candidates.append((idx, p))
+    pool = close_candidates if close_candidates else all_candidates
+    if not pool:
+        return None, None
+    weights = [
+        _message_weight(p, recipient_session, sessions)
+        for _, p in pool
+    ]
+    if sum(weights) <= 0:
+        return pool[0][0], pool[0][1]
+    pick = random.choices(population=pool, weights=weights, k=1)[0]
+    return pick[0], pick[1]
 
 # Main entry point to run the Flask app
 if __name__ == '__main__':
