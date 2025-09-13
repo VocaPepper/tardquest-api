@@ -39,7 +39,7 @@ TURNSTILE_SECRET=your_turnstile_secret_here
 TARDQUEST_ABUSE_KEY=your_admin_key_here
 ```
 
-## SSL certificate setup (development)
+## SSL certificate setup (development, optional)
 
 Generate self-signed certs for local HTTPS.
 
@@ -77,7 +77,7 @@ Note: Browsers will warn on self-signed certs. Use a trusted CA for production.
 
 ## Running the server
 
-The app binds to all interfaces on port 9601 and requires SSL certs.
+The app binds to all interfaces on port 9601.
 
 ```powershell
 # From the project root
@@ -86,6 +86,8 @@ python .\TardQuest_API.py
 
 - URL: `https://<your-hostname-or-ip>:9601`
 - For local testing: `https://localhost:9601`
+> [!NOTE]
+> If running without SSL, it will default to `http://` and give you a warning in the console.
 
 ## API endpoints
 
