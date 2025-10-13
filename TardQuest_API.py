@@ -1,4 +1,4 @@
-# Import necessary modules for Flask API, CORS, rate limiting, file operations, UUID generation, regex, HTTP requests, datetime, unicode normalization, environment variables, random, and SQLite database support
+# Import necessary modules
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_limiter import Limiter
@@ -11,10 +11,10 @@ import requests
 from datetime import datetime, timedelta
 import unicodedata
 from dotenv import load_dotenv
-import random  # weighted selection jitter
-import sqlite3  # SQLite database
-import threading # for background tasks
-import time # for sleep in background tasks
+import random
+import sqlite3
+import threading
+import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -22,18 +22,30 @@ load_dotenv()
 # Initialize Flask application
 app = Flask(__name__)
 # Enable CORS for specified origins to allow cross-origin requests
-CORS(app, origins=["http://localhost:5500", "http://localhost:9599", "https://vocapepper.com", "https://milklounge.wang"])
-# 5500: Used for local development, change as needed
-# 9599: Used for Electron app in production
+CORS(app)
 
 # --- SQLite setup ---
 # Single DB file for all data
 DB_FILE = os.path.join(os.path.dirname(__file__), "tardquest.db")
 
+def get_db_connection():
+    # Open an sqlite3 connection with recommended pragmas for better concurrency
+    # Use this helper throughout the code instead of sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=30, detect_types=sqlite3.PARSE_DECLTYPES)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA foreign_keys=ON;")
+    except Exception:
+        # best-effort; do not fail if pragmas are unsupported
+        pass
+    return conn
+
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
+        # Create leaderboard table if it doesn't exist
         """
         CREATE TABLE IF NOT EXISTS leaderboard (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,6 +56,7 @@ def init_db():
         """
     )
     cur.execute(
+        # Create sessions table if it doesn't exist
         """
         CREATE TABLE IF NOT EXISTS sessions (
             session_id TEXT PRIMARY KEY,
@@ -61,6 +74,7 @@ def init_db():
         """
     )
     cur.execute(
+        # Create pigeons table if it doesn't exist
         """
         CREATE TABLE IF NOT EXISTS pigeons (
             id TEXT PRIMARY KEY,
@@ -77,6 +91,7 @@ def init_db():
         """
     )
     cur.execute(
+        # Create abuse_events table if it doesn't exist
         """
         CREATE TABLE IF NOT EXISTS abuse_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,6 +104,7 @@ def init_db():
         """
     )
     cur.execute(
+        # Create abuse_flagged table if it doesn't exist
         """
         CREATE TABLE IF NOT EXISTS abuse_flagged (
             ip TEXT PRIMARY KEY,
@@ -105,9 +121,9 @@ init_db()
 
 # Session management helper functions
 
-# Load sessions from file
+# Load sessions from database
 def load_sessions():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified FROM sessions')
     rows = cur.fetchall()
@@ -128,10 +144,10 @@ def load_sessions():
         }
     return sessions
 
-# Save sessions to file with debug print
+# Save sessions to database
 def save_sessions(sessions):
     # Replace-all approach keeps the rest of the code unchanged
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('DELETE FROM sessions')
     for sid, s in sessions.items():
@@ -154,9 +170,9 @@ def save_sessions(sessions):
     conn.commit()
     conn.close()
 
-# Load pigeons from file
+# Load pigeons from database
 def load_pigeons():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cur = conn.cursor()
     # Preserve append order by created timestamp
     cur.execute('SELECT id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to FROM pigeons ORDER BY datetime(created) ASC')
@@ -178,9 +194,9 @@ def load_pigeons():
         })
     return pigeons
 
-# Save pigeons to file
+# Save pigeons to database
 def save_pigeons(pigeons):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('DELETE FROM pigeons')
     for p in pigeons:
@@ -242,13 +258,13 @@ ABUSE_SANITIZE_REJECT_THRESHOLD = 2
 # Threshold for captcha failures
 ABUSE_CAPTCHA_FAIL_THRESHOLD = 2
 # Duration for abuse flag (ban) in seconds
-ABUSE_FLAG_DURATION_SECONDS = 3600 # 1 hour flag
+ABUSE_FLAG_DURATION_SECONDS = 3600  # 1 hour flag
 # Admin key for viewing abuse metrics
 ABUSE_ADMIN_KEY = os.environ.get("TARDQUEST_ABUSE_KEY")  # optional secret for viewing metrics
 
-# Load abuse state from file
+# Load abuse state from database
 def _load_abuse_state():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cur = conn.cursor()
     # Events
     cur.execute('SELECT ts, ip, metric, sid, extra FROM abuse_events')
@@ -272,9 +288,9 @@ def _load_abuse_state():
     conn.close()
     return {'events': events, 'flagged': flagged}
 
-# Save abuse state to file
+# Save abuse state to database
 def _save_abuse_state(state):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('DELETE FROM abuse_events')
     for e in state.get('events', []):
@@ -386,7 +402,7 @@ def sanitize_pigeon_message(raw: str) -> str:
 limiter = Limiter(
     get_remote_address,
     app=app,
-    default_limits=["100 per hour"]
+    default_limits=["100 per hour"],
 )
 
 # API Endpoints
@@ -416,7 +432,7 @@ def vocaguard_start():
 @limiter.limit("10 per minute")  # 10 updates per minute per IP
 def vocaguard_update():
     # Updates session progress
-    data = request.get_json()
+    data = request.get_json() or {}
     session_id = data.get('session_id')
     floor = data.get('floor')
     level = data.get('level')
@@ -470,15 +486,13 @@ def vocaguard_update():
     sessions[session_id] = session
     save_sessions(sessions)
 
-    return jsonify({
-        "status": "updated",
-    }, 200)
+    return jsonify({"status": "updated"}), 200
 
 # Validate final submission before leaderboard post
 @app.route('/api/vocaguard/validate', methods=['POST'])
 def vocaguard_validate():
     # Validates final submission before leaderboard post
-    data = request.get_json()
+    data = request.get_json() or {}
     session_id = data.get('session_id')
     floor = data.get('floor')
     level = data.get('level')
@@ -509,7 +523,7 @@ def leaderboard():
     if request.method == 'GET':
         try:
             # Load from SQLite and sanitize like before
-            conn = sqlite3.connect(DB_FILE)
+            conn = get_db_connection()
             cur = conn.cursor()
             cur.execute('SELECT name, floor, level FROM leaderboard ORDER BY floor DESC, level DESC')
             leaderboard_data = [
@@ -527,7 +541,7 @@ def leaderboard():
     # POST: Update the leaderboard
     elif request.method == 'POST':
         try:
-            new_entry = request.get_json()
+            new_entry = request.get_json() or {}
             print("DEBUG: Received entry:", new_entry)
             if not new_entry or not isinstance(new_entry, dict):
                 log_rejection("Invalid data format", new_entry)
@@ -538,10 +552,7 @@ def leaderboard():
                 log_rejection("Missing required core fields", new_entry)
                 return jsonify({"error": f"Missing required fields: {required_fields}"}), 400
             # Accept multiple possible captcha token keys: legacy 'hcaptcha_token', generic 'captcha_token'
-            captcha_token = (
-                new_entry.get('captcha_token') or
-                new_entry.get('hcaptcha_token')
-            )
+            captcha_token = (new_entry.get('captcha_token') or new_entry.get('hcaptcha_token'))
             if not captcha_token:
                 log_rejection("Captcha token missing", new_entry)
                 return jsonify({"error": "Captcha token missing"}), 400
@@ -596,7 +607,7 @@ def leaderboard():
             save_sessions(sessions)
             # Insert into SQLite and return sorted list
             entry_to_store = {k: v for k, v in new_entry.items() if k not in ('session_id', 'hcaptcha_token', 'captcha_token')}
-            conn = sqlite3.connect(DB_FILE)
+            conn = get_db_connection()
             cur = conn.cursor()
             cur.execute(
                 'INSERT INTO leaderboard (name, floor, level) VALUES (?, ?, ?)',
@@ -623,7 +634,7 @@ def pigeon_inventory():
     # Abuse flag check
     flagged, info = _is_flagged(request.remote_addr)
     if flagged:
-        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}).copy(), 429
+        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
     sessions = load_sessions()
     session = sessions.get(session_id)
     if not session:
@@ -645,7 +656,7 @@ def pigeon_purchase():
     flagged, info = _is_flagged(request.remote_addr)
     if flagged:
         _record_abuse('blocked_request', request.remote_addr, session_id)
-        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}).copy(), 429
+        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
     sessions = load_sessions()
     session = sessions.get(session_id)
     if not session:
@@ -681,7 +692,7 @@ def pigeon_send():
     flagged, info = _is_flagged(request.remote_addr)
     if flagged:
         _record_abuse('blocked_request', request.remote_addr, session_id)
-        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}).copy(), 429
+        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
 
     sessions = load_sessions()
     session = sessions.get(session_id)
@@ -874,9 +885,9 @@ def clean_json(obj):
     else:
         return obj
 
-# Log rejection reason to file
+# Log rejection reason to database
 def log_rejection(reason, data):
-    # Append rejection event into abuse tracking file
+    # Append rejection event into abuse tracking database
     try:
         state = _load_abuse_state()
         now_ts = int(datetime.utcnow().timestamp())
@@ -1000,7 +1011,7 @@ def _select_pigeon_for_delivery(pigeons: list, recipient_session: dict, sessions
 def purge_old_sessions():
     # Delete sessions older than 30 days
     cutoff = (datetime.utcnow() - timedelta(days=30)).isoformat()
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM sessions WHERE created < ?", (cutoff,))
     conn.commit()

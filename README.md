@@ -1,150 +1,106 @@
 # TardQuest API
 
-A Flask-based REST API server for [TardQuest](https://github.com/packardbell95/tardquest)
+A Flask-based REST API for the TardQuest game featuring anti-cheat protection, leaderboard management, and a carrier pigeon messaging system.
 
 ## Features
 
-- Session Management (VocaGuard) with anti-cheat checks
-- Leaderboard (sorted by floor then level)
-- Pigeon Messaging with weighted, progress-aware delivery
-- Abuse Protection & Rate Limiting (Flask-Limiter)
-- Captcha Verification (hCaptcha and Cloudflare Turnstile)
-- HTTPS Support (self-signed or CA certificates)
-- CORS with an allowlist of origins
-- SQLite-backed persistence (no more JSON file storage)
+- **VocaGuard Anti-Cheat**: Session-based progress validation with rate limiting
+- **Leaderboard**: Player rankings with captcha protection
+- **Carrier Pigeon Messaging**: Proximity-based message delivery between players
+- **SQLite Database**: Persistent storage for sessions, messages, and abuse tracking
+- **Rate Limiting**: Protection against spam and abuse
 
-## What's new
+## Quick Start
 
-- Storage migrated to SQLite (`tardquest.db`) for sessions, pigeons, leaderboard, and abuse data.
-- Pigeon delivery now uses weighted selection favoring similar progress, older messages, and verified senders with anti-repetition.
+### Prerequisites
 
-## Installation
+- Python 3.8+
+- pip
 
-1) Clone the repository
-```powershell
-git clone https://github.com/VocaPepper/tardquest-api.git
-cd tardquest-api
-```
+### Installation
 
-2) Install dependencies
-```powershell
-pip install -r requirements.txt
-```
+1. **Clone the repository**
+   ```bash
+   git clone <repository-url>
+   cd tardquest-api
+   ```
 
-3) Configure environment
-Create a `.env` file in the project root:
-```dotenv
-HCAPTCHA_SECRET=your_hcaptcha_secret_here
-TURNSTILE_SECRET=your_turnstile_secret_here
-TARDQUEST_ABUSE_KEY=your_admin_key_here
-```
+2. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-## SSL certificate setup (development)
+3. **Configure environment variables**
+   
+   Create a `.env` file in the root directory:
+   ```env
+   HCAPTCHA_SECRET=your_hcaptcha_secret_key
+   TURNSTILE_SECRET=your_turnstile_secret_key
+   TARDQUEST_ABUSE_KEY=your_admin_key_for_abuse_metrics
+   ```
 
-Generate self-signed certs for local HTTPS.
+4. **Run the API**
+   ```bash
+   python TardQuest_API.py
+   ```
 
-1) Create the `ssl` directory (PowerShell)
-```powershell
-New-Item -ItemType Directory -Force ssl | Out-Null
-Set-Location ssl
-```
+   The API will start on `http://0.0.0.0:9601`
 
-2) Generate a private key
-```powershell
-openssl genrsa -out priv-key.pem 2048
-```
+### SSL/HTTPS (Optional)
 
-3) Generate a certificate signing request (CSR)
-```powershell
-openssl req -new -key priv-key.pem -out certificate.csr
-```
-
-4) Generate a self-signed certificate (valid for 365 days)
-```powershell
-openssl x509 -req -days 365 -in certificate.csr -signkey priv-key.pem -out certificate.pem
-```
-
-5) Optional: remove the CSR
-```powershell
-Remove-Item certificate.csr
-```
-
-Paths expected by the app:
+For HTTPS support, place SSL certificates in the `ssl/` directory:
 - `ssl/certificate.pem`
 - `ssl/priv-key.pem`
 
-Note: Browsers will warn on self-signed certs. Use a trusted CA for production.
+## API Endpoints
 
-## Running the server
-
-The app binds to all interfaces on port 9601 and requires SSL certs.
-
-```powershell
-# From the project root
-python .\TardQuest_API.py
-```
-
-- URL: `https://<your-hostname-or-ip>:9601`
-- For local testing: `https://localhost:9601`
-
-## API endpoints
-
-### VocaGuard (session management)
-- POST `/api/vocaguard/start` – Create a session ID
-- POST `/api/vocaguard/update` – Update floor/level with anti-cheat checks
-- POST `/api/vocaguard/validate` – Validate final submission before leaderboard post
+### VocaGuard (Anti-Cheat)
+- `POST /api/vocaguard/start` - Start new session
+- `POST /api/vocaguard/update` - Update progress
+- `POST /api/vocaguard/validate` - Validate final submission
 
 ### Leaderboard
-- GET `/api/leaderboard/status` – Health check
-- GET `/api/leaderboard` – Sorted leaderboard data
-- POST `/api/leaderboard` – Submit an entry (requires captcha + valid session)
+- `GET /api/leaderboard/status` - API health check
+- `GET /api/leaderboard` - Get rankings
+- `POST /api/leaderboard` - Submit score (requires captcha)
 
-### Pigeons
-- GET `/api/pigeon/inventory` – Get session’s pigeon count
-- POST `/api/pigeon/purchase` – Buy a pigeon (rate-limited)
-- POST `/api/pigeon/send` – Send a sanitized message (uses inventory)
-- POST `/api/pigeon/delivery` – Receive one message
-  - Delivery uses weighted random selection with:
-    - Preference for similar floors (±2 by default)
-    - Age boost for older messages
-    - Bonus for verified senders
-    - Penalty to avoid delivering from the same sender twice in a row
+### Carrier Pigeon
+- `GET /api/pigeon/inventory` - Check pigeon count
+- `POST /api/pigeon/purchase` - Buy a pigeon
+- `POST /api/pigeon/send` - Send a message
+- `POST /api/pigeon/delivery` - Receive a message
 
-### Abuse monitoring
-- GET `/api/abuse/status?key=...` – Admin-only metrics if `TARDQUEST_ABUSE_KEY` is set
+### Admin
+- `GET /api/abuse/status?key=<admin_key>` - View abuse metrics
 
 ## Configuration
 
-- CORS origins (in code):
-  - `http://localhost:5500`, `http://localhost:9599`, `https://vocapepper.com`, `https://milklounge.wang`
-  - Adjust in `TardQuest_API.py` where `CORS(app, origins=[...])` is configured.
-- Rate limits:
-  - Default: 100/hour per IP
-  - Pigeon purchase: 20/hour per IP
-  - Pigeon send: 5/minute per IP
-  - Delivery: 5/minute per IP
-- Session settings:
-  - Timeout: 120 minutes (renews on updates)
-  - Inventory cap: 20 pigeons per session
+Key settings in `TardQuest_API.py`:
 
-## Data storage (SQLite)
+- **Session Timeout**: 120 minutes (resets on update)
+- **Max Pigeons**: 20 per session
+- **Message Length**: 420 characters max
+- **Rate Limits**: Configurable per endpoint
+- **Port**: 9601
 
-Data is stored in `tardquest.db` in the project directory with the following tables:
-- `sessions(session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified)`
-- `leaderboard(id, name, floor, level)`
-- `pigeons(id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to)`
-- `abuse_events(id, ts, ip, metric, sid, extra)`
-- `abuse_flagged(ip, until, counts)`
+## Database
 
-Note: Earlier JSON files are no longer used. If you have legacy data, create a one-time migration script to import into SQLite.
+The API automatically creates `tardquest.db` with the following tables:
+- `leaderboard` - Player rankings
+- `sessions` - Active game sessions
+- `pigeons` - Message queue
+- `abuse_events` - Abuse tracking
+- `abuse_flagged` - Flagged IPs
 
-## Security notes
+Old sessions are automatically purged after 30 days.
 
-- Captcha is required for leaderboard submissions (hCaptcha or Turnstile)
-- Inputs are sanitized, and rate limits help mitigate abuse
-- For production, use a trusted TLS certificate and consider a persistent rate-limit storage backend (e.g., Redis)
+## Development
 
-## Troubleshooting
+Run in debug mode (for development only):
+```python
+app.run(debug=True, host='0.0.0.0', port=9601)
+```
 
-- SSL file not found: ensure `ssl/certificate.pem` and `ssl/priv-key.pem` exist.
-- CORS errors: add your frontend origin to the CORS allowlist in code.
+## License
+
+MIT
