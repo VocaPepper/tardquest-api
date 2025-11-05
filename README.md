@@ -34,9 +34,7 @@ A Flask-based REST API for the TardQuest game featuring anti-cheat protection, l
    
    Create a `.env` file in the root directory:
    ```env
-   HCAPTCHA_SECRET=your_hcaptcha_secret_key
    TURNSTILE_SECRET=your_turnstile_secret_key
-   TARDQUEST_ABUSE_KEY=your_admin_key_for_abuse_metrics
    ```
 
 4. **Run the API**
@@ -70,10 +68,26 @@ For HTTPS support, place SSL certificates in the `ssl/` directory:
 - `POST /api/pigeon/send` - Send a message
 - `POST /api/pigeon/delivery` - Receive a message
 
-### Admin
-- `GET /api/abuse/status?key=<admin_key>` - View abuse metrics
+### Admin (Whitelisted IPs Only)
+- `GET /api/abuse/status` - View abuse metrics (requires whitelisted IP)
 
-## Configuration
+## Access Control
+
+### IP Whitelisting
+
+The `/api/abuse/status` endpoint is protected by IP whitelisting. Whitelisted IPs are stored in `whitelist.json`:
+
+```json
+{
+  "ips": [
+    "192.168.1.100",
+    "203.0.113.45"
+  ],
+  "updated": "2025-11-04T12:00:00.000000"
+}
+```
+
+Only requests from whitelisted IP addresses will be granted access to abuse metrics. Unauthorized access attempts are logged to `log.json`.
 
 Key settings in `TardQuest_API.py`:
 
@@ -89,10 +103,16 @@ The API automatically creates `tardquest.db` with the following tables:
 - `leaderboard` - Player rankings
 - `sessions` - Active game sessions
 - `pigeons` - Message queue
-- `abuse_events` - Abuse tracking
-- `abuse_flagged` - Flagged IPs
 
 Old sessions are automatically purged after 30 days.
+
+## Logging & Configuration Files
+
+Error and rejection logs are stored as JSON files:
+- `vocaguard.json` - VocaGuard-related errors and rejections (session validation, submission rejections, etc.)
+- `log.json` - General server errors and other non-VocaGuard issues
+- `flagged.json` - Flagged IP addresses with expiration times and abuse metric counts
+- `whitelist.json` - IP addresses allowed to access admin endpoints (e.g., `/api/abuse/status`)
 
 ## Development
 

@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from typing import Dict, List, Tuple, Optional
 import json
 import os
 import uuid
@@ -15,6 +16,7 @@ import random
 import sqlite3
 import threading
 import time
+import traceback
 
 # Load environment variables from .env file
 load_dotenv()
@@ -24,6 +26,20 @@ app = Flask(__name__)
 # Enable CORS for specified origins to allow cross-origin requests
 CORS(app)
 
+# --- Application Configuration Constants ---
+# Database connection timeout in seconds
+DB_CONNECTION_TIMEOUT_SECONDS = 30
+# API rate limiting: default maximum requests
+API_DEFAULT_RATE_LIMIT = "100 per hour"
+# External API timeout in seconds (for Turnstile, etc)
+EXTERNAL_API_TIMEOUT_SECONDS = 5
+# Session age before auto-purge in days
+SESSION_PURGE_AGE_DAYS = 30
+# Background worker sleep interval in seconds
+BACKGROUND_WORKER_SLEEP_SECONDS = 24 * 60 * 60  # 24 hours
+# Maximum leaderboard name length
+MAX_LEADERBOARD_NAME_LENGTH = 5
+
 # --- SQLite setup ---
 # Single DB file for all data
 DB_FILE = os.path.join(os.path.dirname(__file__), "tardquest.db")
@@ -31,7 +47,7 @@ DB_FILE = os.path.join(os.path.dirname(__file__), "tardquest.db")
 def get_db_connection():
     # Open an sqlite3 connection with recommended pragmas for better concurrency
     # Use this helper throughout the code instead of sqlite3.connect(DB_FILE)
-    conn = sqlite3.connect(DB_FILE, timeout=30, detect_types=sqlite3.PARSE_DECLTYPES)
+    conn = sqlite3.connect(DB_FILE, timeout=DB_CONNECTION_TIMEOUT_SECONDS, detect_types=sqlite3.PARSE_DECLTYPES)
     try:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
@@ -90,29 +106,6 @@ def init_db():
         )
         """
     )
-    cur.execute(
-        # Create abuse_events table if it doesn't exist
-        """
-        CREATE TABLE IF NOT EXISTS abuse_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts INTEGER NOT NULL,
-            ip TEXT NOT NULL,
-            metric TEXT NOT NULL,
-            sid TEXT,
-            extra TEXT
-        )
-        """
-    )
-    cur.execute(
-        # Create abuse_flagged table if it doesn't exist
-        """
-        CREATE TABLE IF NOT EXISTS abuse_flagged (
-            ip TEXT PRIMARY KEY,
-            until INTEGER NOT NULL,
-            counts TEXT NOT NULL
-        )
-        """
-    )
     conn.commit()
     conn.close()
 
@@ -122,101 +115,115 @@ init_db()
 # Session management helper functions
 
 # Load sessions from database
-def load_sessions():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('SELECT session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified FROM sessions')
-    rows = cur.fetchall()
-    conn.close()
-    sessions = {}
-    for r in rows:
-        sessions[r[0]] = {
-            'floor': int(r[1]),
-            'level': int(r[2]),
-            'expires': r[3],
-            'created': r[4],
-            'inv': (json.loads(r[5]) if r[5] else {}),
-            'last_level_update': r[6],
-            'last_floor_update': r[7],
-            'last_message_received_at': r[8],
-            'last_from_session_delivered': r[9],
-            'verified': bool(r[10])
-        }
-    return sessions
+def load_sessions() -> Dict[str, Dict]:
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified FROM sessions')
+        rows = cur.fetchall()
+        conn.close()
+        sessions = {}
+        for r in rows:
+            sessions[r[0]] = {
+                'floor': int(r[1]),
+                'level': int(r[2]),
+                'expires': r[3],
+                'created': r[4],
+                'inv': (json.loads(r[5]) if r[5] else {}),
+                'last_level_update': r[6],
+                'last_floor_update': r[7],
+                'last_message_received_at': r[8],
+                'last_from_session_delivered': r[9],
+                'verified': bool(r[10])
+            }
+        return sessions
+    except Exception as e:
+        log_error('load_sessions', e)
+        return {}
 
 # Save sessions to database
-def save_sessions(sessions):
+def save_sessions(sessions: Dict[str, Dict]) -> None:
     # Replace-all approach keeps the rest of the code unchanged
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('DELETE FROM sessions')
-    for sid, s in sessions.items():
-        cur.execute(
-            'INSERT OR REPLACE INTO sessions (session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (
-                sid,
-                int(s.get('floor', 1)),
-                int(s.get('level', 1)),
-                s.get('expires', ''),
-                s.get('created', ''),
-                json.dumps(s.get('inv', {})),
-                s.get('last_level_update'),
-                s.get('last_floor_update'),
-                s.get('last_message_received_at'),
-                s.get('last_from_session_delivered'),
-                1 if s.get('verified') else 0,
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('DELETE FROM sessions')
+        for sid, s in sessions.items():
+            cur.execute(
+                'INSERT OR REPLACE INTO sessions (session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (
+                    sid,
+                    int(s.get('floor', 1)),
+                    int(s.get('level', 1)),
+                    s.get('expires', ''),
+                    s.get('created', ''),
+                    json.dumps(s.get('inv', {})),
+                    s.get('last_level_update'),
+                    s.get('last_floor_update'),
+                    s.get('last_message_received_at'),
+                    s.get('last_from_session_delivered'),
+                    1 if s.get('verified') else 0,
+                )
             )
-        )
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log_error('save_sessions', e, {'session_count': len(sessions)})
 
 # Load pigeons from database
-def load_pigeons():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    # Preserve append order by created timestamp
-    cur.execute('SELECT id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to FROM pigeons ORDER BY datetime(created) ASC')
-    rows = cur.fetchall()
-    conn.close()
-    pigeons = []
-    for r in rows:
-        pigeons.append({
-            'id': r[0],
-            'text': r[1],
-            'from_session': r[2],
-            'from_floor': int(r[3]),
-            'from_level': int(r[4]),
-            'from_verified': bool(r[5]),
-            'created': r[6],
-            'delivered': bool(r[7]),
-            'delivered_at': r[8],
-            'delivered_to': r[9],
-        })
-    return pigeons
+def load_pigeons() -> List[Dict]:
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # Preserve append order by created timestamp
+        cur.execute('SELECT id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to FROM pigeons ORDER BY datetime(created) ASC')
+        rows = cur.fetchall()
+        conn.close()
+        pigeons = []
+        for r in rows:
+            pigeons.append({
+                'id': r[0],
+                'text': r[1],
+                'from_session': r[2],
+                'from_floor': int(r[3]),
+                'from_level': int(r[4]),
+                'from_verified': bool(r[5]),
+                'created': r[6],
+                'delivered': bool(r[7]),
+                'delivered_at': r[8],
+                'delivered_to': r[9],
+            })
+        return pigeons
+    except Exception as e:
+        log_error('load_pigeons', e)
+        return []
 
 # Save pigeons to database
-def save_pigeons(pigeons):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('DELETE FROM pigeons')
-    for p in pigeons:
-        cur.execute(
-            'INSERT OR REPLACE INTO pigeons (id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (
-                p.get('id') or str(uuid.uuid4()),
-                p.get('text', ''),
-                p.get('from_session', ''),
-                int(p.get('from_floor', 0)),
-                int(p.get('from_level', 0)),
-                1 if p.get('from_verified') else 0,
-                p.get('created', datetime.utcnow().isoformat()),
-                1 if p.get('delivered') else 0,
-                p.get('delivered_at'),
-                p.get('delivered_to'),
+def save_pigeons(pigeons: List[Dict]) -> None:
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('DELETE FROM pigeons')
+        for p in pigeons:
+            cur.execute(
+                'INSERT OR REPLACE INTO pigeons (id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (
+                    p.get('id') or str(uuid.uuid4()),
+                    p.get('text', ''),
+                    p.get('from_session', ''),
+                    int(p.get('from_floor', 0)),
+                    int(p.get('from_level', 0)),
+                    1 if p.get('from_verified') else 0,
+                    p.get('created', datetime.utcnow().isoformat()),
+                    1 if p.get('delivered') else 0,
+                    p.get('delivered_at'),
+                    p.get('delivered_to'),
+                )
             )
-        )
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log_error('save_pigeons', e, {'pigeon_count': len(pigeons)})
 
 # Get pending (undelivered) pigeons
 def _pending_pigeons(pigeons):
@@ -259,75 +266,234 @@ ABUSE_SANITIZE_REJECT_THRESHOLD = 2
 ABUSE_CAPTCHA_FAIL_THRESHOLD = 2
 # Duration for abuse flag (ban) in seconds
 ABUSE_FLAG_DURATION_SECONDS = 3600  # 1 hour flag
-# Admin key for viewing abuse metrics
-ABUSE_ADMIN_KEY = os.environ.get("TARDQUEST_ABUSE_KEY")  # optional secret for viewing metrics
 
-# Load abuse state from database
-def _load_abuse_state():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    # Events
-    cur.execute('SELECT ts, ip, metric, sid, extra FROM abuse_events')
-    events = []
-    for ts, ip, metric, sid, extra in cur.fetchall():
-        events.append({
-            'ts': int(ts),
-            'ip': ip,
-            'metric': metric,
-            'sid': sid,
-            'extra': (json.loads(extra) if extra else {}),
-        })
-    # Flagged
-    cur.execute('SELECT ip, until, counts FROM abuse_flagged')
-    flagged = {}
-    for ip, until, counts in cur.fetchall():
-        flagged[ip] = {
-            'until': int(until),
-            'counts': (json.loads(counts) if counts else {}),
+# --- Helper Functions for API Responses ---
+
+def error_response(message: str, status_code: int = 400, extra: Optional[Dict] = None) -> Tuple:
+    """
+    Create a standardized error response.
+    
+    Args:
+        message: Error message to return to client
+        status_code: HTTP status code (default: 400)
+        extra: Optional dictionary to merge into response
+        
+    Returns:
+        Tuple of (JSON response, status code)
+    """
+    response = {"error": message}
+    if extra:
+        response.update(extra)
+    return jsonify(response), status_code
+
+
+def success_response(data: Dict, message: Optional[str] = None, status_code: int = 200) -> Tuple:
+    """
+    Create a standardized success response.
+    
+    Args:
+        data: Data dictionary to return to client
+        message: Optional message to include in response
+        status_code: HTTP status code (default: 200)
+        
+    Returns:
+        Tuple of (JSON response, status code)
+    """
+    response = {"success": True, **data}
+    if message:
+        response["message"] = message
+    return jsonify(response), status_code
+
+# Log to vocaguard.json for VocaGuard-related errors and rejections
+def log_to_vocaguard_json(event: Dict) -> None:
+    """
+    Log an abuse/VocaGuard event to vocaguard.json.
+    
+    Args:
+        event: Dictionary containing event data (ts, ip, metric, etc.)
+    """
+    vocaguard_log_file = os.path.join(os.path.dirname(__file__), "vocaguard.json")
+    try:
+        # Load existing logs or start fresh
+        logs = []
+        if os.path.exists(vocaguard_log_file):
+            with open(vocaguard_log_file, 'r') as f:
+                logs = json.load(f)
+        # Append new event
+        logs.append(event)
+        # Write back
+        with open(vocaguard_log_file, 'w') as f:
+            json.dump(logs, f, indent=2)
+    except Exception as e:
+        print(f"VOCAGUARD LOG ERROR: {e}")
+
+# Log to log.json for general server errors
+def log_to_general_json(event: Dict) -> None:
+    """
+    Log a general server error to log.json.
+    
+    Args:
+        event: Dictionary containing error event data (error, traceback, etc.)
+    """
+    log_file = os.path.join(os.path.dirname(__file__), "log.json")
+    try:
+        # Load existing logs or start fresh
+        logs = []
+        if os.path.exists(log_file):
+            with open(log_file, 'r') as f:
+                logs = json.load(f)
+        # Append new event
+        logs.append(event)
+        # Write back
+        with open(log_file, 'w') as f:
+            json.dump(logs, f, indent=2)
+    except Exception as e:
+        print(f"GENERAL LOG ERROR: {e}")
+
+# Log an error to log.json with context
+def log_error(function_name: str, error: Exception, context: Optional[Dict] = None) -> None:
+    """
+    Log an error with full stack trace and context to log.json.
+    
+    Args:
+        function_name: Name of the function where error occurred
+        error: The exception object
+        context: Optional dictionary with contextual data (counts, session info, etc.)
+    """
+    try:
+        error_event = {
+            'ts': int(datetime.utcnow().timestamp()),
+            'function': function_name,
+            'error': str(error),
+            'error_type': type(error).__name__,
+            'traceback': traceback.format_exc()
         }
-    conn.close()
-    return {'events': events, 'flagged': flagged}
+        if context:
+            error_event['context'] = context
+        log_to_general_json(error_event)
+    except Exception as e:
+        print(f"LOG ERROR FAILED: {e}")
 
-# Save abuse state to database
-def _save_abuse_state(state):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('DELETE FROM abuse_events')
-    for e in state.get('events', []):
-        cur.execute(
-            'INSERT INTO abuse_events (ts, ip, metric, sid, extra) VALUES (?, ?, ?, ?, ?)',
-            (
-                int(e.get('ts', 0)),
-                str(e.get('ip', '')),
-                str(e.get('metric', '')),
-                str(e.get('sid', '')),
-                json.dumps(e.get('extra', {})),
-            )
-        )
-    cur.execute('DELETE FROM abuse_flagged')
-    for ip, info in (state.get('flagged', {}) or {}).items():
-        cur.execute(
-            'INSERT OR REPLACE INTO abuse_flagged (ip, until, counts) VALUES (?, ?, ?)',
-            (str(ip), int(info.get('until', 0)), json.dumps(info.get('counts', {})))
-        )
-    conn.commit()
-    conn.close()
+def _load_vocaguard_events() -> List[Dict]:
+    """
+    Load recent vocaguard events within the time window from vocaguard.json.
+    
+    Returns:
+        List of event dictionaries from the past ABUSE_EVENT_WINDOW_SECONDS
+    """
+    vocaguard_log_file = os.path.join(os.path.dirname(__file__), "vocaguard.json")
+    events = []
+    if os.path.exists(vocaguard_log_file):
+        try:
+            with open(vocaguard_log_file, 'r') as f:
+                all_events = json.load(f)
+            now_ts = int(datetime.utcnow().timestamp())
+            cutoff = now_ts - ABUSE_EVENT_WINDOW_SECONDS
+            # Filter events within the time window
+            events = [e for e in all_events if e.get('ts', 0) >= cutoff]
+        except Exception as e:
+            log_error('load_vocaguard_events', e)
+    return events
 
-# Prune old events and expired flags
-def _prune_events(state, now_ts):
-    cutoff = now_ts - ABUSE_EVENT_WINDOW_SECONDS
-    state['events'] = [e for e in state['events'] if e.get('ts', 0) >= cutoff]
-    # Remove expired flags
-    expired_ips = [ip for ip, info in state.get('flagged', {}).items() if info.get('until', 0) < now_ts]
-    for ip in expired_ips:
-        state['flagged'].pop(ip, None)
+# Load flagged IPs from flagged.json
+def _load_flagged_ips() -> Dict[str, Dict]:
+    """
+    Load flagged (banned) IPs from flagged.json.
+    
+    Returns:
+        Dictionary mapping IP addresses to their flag information (expiry, counts)
+    """
+    flagged_file = os.path.join(os.path.dirname(__file__), "flagged.json")
+    flagged = {}
+    if os.path.exists(flagged_file):
+        try:
+            with open(flagged_file, 'r') as f:
+                flagged = json.load(f)
+        except Exception as e:
+            log_error('load_flagged_ips', e)
+    return flagged
+
+# Save flagged IPs to flagged.json
+def _save_flagged_ips(flagged: Dict[str, Dict]) -> None:
+    """
+    Save flagged IPs dictionary to flagged.json.
+    
+    Args:
+        flagged: Dictionary mapping IPs to flag information
+    """
+    flagged_file = os.path.join(os.path.dirname(__file__), "flagged.json")
+    try:
+        with open(flagged_file, 'w') as f:
+            json.dump(flagged, f, indent=2)
+    except Exception as e:
+        log_error('save_flagged_ips', e)
+
+# Load whitelisted IPs from whitelist.json
+def _load_whitelist() -> List[str]:
+    """
+    Load admin whitelisted IPs from whitelist.json.
+    
+    Returns:
+        List of whitelisted IP address strings
+    """
+    whitelist_file = os.path.join(os.path.dirname(__file__), "whitelist.json")
+    whitelist = []
+    if os.path.exists(whitelist_file):
+        try:
+            with open(whitelist_file, 'r') as f:
+                data = json.load(f)
+                # Support both list format and object format
+                if isinstance(data, list):
+                    whitelist = data
+                elif isinstance(data, dict) and 'ips' in data:
+                    whitelist = data['ips']
+        except Exception as e:
+            log_error('load_whitelist', e)
+    return whitelist
+
+# Save whitelisted IPs to whitelist.json
+def _save_whitelist(whitelist: List[str]) -> None:
+    """
+    Save whitelisted IPs list to whitelist.json.
+    
+    Args:
+        whitelist: List of IP address strings to whitelist
+    """
+    whitelist_file = os.path.join(os.path.dirname(__file__), "whitelist.json")
+    try:
+        with open(whitelist_file, 'w') as f:
+            json.dump({'ips': whitelist, 'updated': datetime.utcnow().isoformat()}, f, indent=2)
+    except Exception as e:
+        log_error('save_whitelist', e)
+
+# Check if an IP is whitelisted
+def _is_ip_whitelisted(ip: str) -> bool:
+    """
+    Check if an IP address is in the whitelist.
+    
+    Args:
+        ip: IP address string to check
+        
+    Returns:
+        True if IP is whitelisted, False otherwise
+    """
+    whitelist = _load_whitelist()
+    return str(ip) in whitelist
 
 # Record an abuse event
-def _record_abuse(metric: str, ip: str, session_id: str = None, extra: dict = None):
+def _record_abuse(metric: str, ip: str, session_id: Optional[str] = None, extra: Optional[Dict] = None) -> None:
+    """
+    Record an abuse event and evaluate if IP should be flagged.
+    
+    Args:
+        metric: Type of abuse (e.g., 'duplicate', 'sanitize_reject', 'captcha_fail')
+        ip: IP address of the abusive request
+        session_id: Optional VocaGuard session ID
+        extra: Optional dictionary with additional context
+    """
     try:
-        state = _load_abuse_state()
         now_ts = int(datetime.utcnow().timestamp())
-        _prune_events(state, now_ts)
+        # Create event for vocaguard.json logging
         event = {
             'ts': now_ts,
             'ip': ip,
@@ -339,37 +505,67 @@ def _record_abuse(metric: str, ip: str, session_id: str = None, extra: dict = No
             # avoid storing sensitive raw data
             safe_extra = {k: (v if k != 'raw' else None) for k, v in extra.items()}
             event['extra'] = safe_extra
-        state['events'].append(event)
-        # Recompute counts for this IP inside window
-        window_events = [e for e in state['events'] if e['ip'] == ip]
+        # Log to vocaguard.json
+        log_to_vocaguard_json(event)
+        
+        # Count recent abuse events from vocaguard.json to determine flagging
+        recent_events = _load_vocaguard_events()
+        ip_events = [e for e in recent_events if e.get('ip') == ip]
+        
+        # Count events by metric
         counts = {}
-        for e in window_events:
-            counts[e['metric']] = counts.get(e['metric'], 0) + 1
+        for e in ip_events:
+            metric_type = e.get('metric')
+            counts[metric_type] = counts.get(metric_type, 0) + 1
+        
+        # Check if IP should be flagged
         should_flag = (
             counts.get('duplicate', 0) >= ABUSE_DUPLICATE_THRESHOLD or
             counts.get('sanitize_reject', 0) >= ABUSE_SANITIZE_REJECT_THRESHOLD or
             counts.get('captcha_fail', 0) >= ABUSE_CAPTCHA_FAIL_THRESHOLD
         )
+        
         if should_flag:
-            state.setdefault('flagged', {})[ip] = {
-                'until': now_ts + ABUSE_FLAG_DURATION_SECONDS,
+            # Update flagged IPs in flagged.json
+            flagged = _load_flagged_ips()
+            flagged[ip] = {
+                'until': int(now_ts + ABUSE_FLAG_DURATION_SECONDS),
                 'counts': counts
             }
-        _save_abuse_state(state)
+            _save_flagged_ips(flagged)
     except Exception as e:
         # Fail open; do not break main flow
-        print(f"ABUSE RECORD ERROR: {e}")
+        log_error('record_abuse', e)
 
 # Check if an IP is flagged for abuse
-def _is_flagged(ip: str):
+def _is_flagged(ip: str) -> Tuple[bool, Optional[Dict]]:
+    """
+    Check if an IP is currently flagged for abuse, with auto-expiration of old flags.
+    
+    Args:
+        ip: IP address to check
+        
+    Returns:
+        Tuple of (is_flagged: bool, flag_info: dict or None)
+    """
     try:
-        state = _load_abuse_state()
+        flagged = _load_flagged_ips()
         now_ts = int(datetime.utcnow().timestamp())
-        info = state.get('flagged', {}).get(ip)
-        if info and info.get('until', 0) > now_ts:
-            return True, info
+        
+        if ip in flagged:
+            info = flagged[ip]
+            if info.get('until', 0) > now_ts:
+                return True, info
+            # Flag has expired, remove it
+            del flagged[ip]
+            _save_flagged_ips(flagged)
+        
         return False, None
-    except Exception:
+    except (json.JSONDecodeError, FileNotFoundError, KeyError) as e:
+        log_error('is_flagged_specific', e)
+        return False, None
+    except Exception as e:
+        log_error('is_flagged_unexpected', e)
         return False, None
 
 # Sanitize pigeon message content
@@ -402,7 +598,7 @@ def sanitize_pigeon_message(raw: str) -> str:
 limiter = Limiter(
     get_remote_address,
     app=app,
-    default_limits=["100 per hour"],
+    default_limits=[API_DEFAULT_RATE_LIMIT],
 )
 
 # API Endpoints
@@ -431,7 +627,7 @@ def vocaguard_start():
 @app.route('/api/vocaguard/update', methods=['POST'])
 @limiter.limit("10 per minute")  # 10 updates per minute per IP
 def vocaguard_update():
-    # Updates session progress
+    # Updates session progress with anti-cheat validation
     data = request.get_json() or {}
     session_id = data.get('session_id')
     floor = data.get('floor')
@@ -447,18 +643,31 @@ def vocaguard_update():
         return jsonify({"error": "Session expired"}), 400
     current_floor = session['floor']
     current_level = session['level']
+    
     # Floor cannot decrease
     if floor < current_floor:
+        _record_abuse('floor_regression', request.remote_addr, session_id, 
+                     {'current': current_floor, 'attempted': floor})
         return jsonify({"error": "Floor regression detected", "detail": f"Current floor: {current_floor}, attempted: {floor}"}), 400
+    
     # Level cannot decrease on same floor
     if floor == current_floor and level < current_level:
+        _record_abuse('level_regression', request.remote_addr, session_id,
+                     {'current': current_level, 'attempted': level})
         return jsonify({"error": "Level regression detected on same floor", "detail": f"Current level: {current_level}, attempted: {level}"}), 400
+    
     # Prevent skipping floors
     if floor > current_floor and floor - current_floor > 1:
+        _record_abuse('floor_skip', request.remote_addr, session_id,
+                     {'current': current_floor, 'attempted': floor, 'skip_distance': floor - current_floor})
         return jsonify({"error": "Abnormal floor jump detected", "detail": f"Current floor: {current_floor}, attempted: {floor}"}), 400
+    
     # Prevent abnormal level jumps (must increment by 1 or stay the same)
     if level > current_level and level - current_level > 1 and floor == current_floor:
+        _record_abuse('level_jump', request.remote_addr, session_id,
+                     {'current': current_level, 'attempted': level, 'jump_distance': level - current_level})
         return jsonify({"error": "Abnormal level jump detected", "detail": f"Current level: {current_level}, attempted: {level}"}), 400
+    
     now = datetime.utcnow()
     last_level_update = session.get('last_level_update')
     last_floor_update = session.get('last_floor_update')
@@ -468,6 +677,8 @@ def vocaguard_update():
         if last_level_update:
             last_level_update_dt = datetime.fromisoformat(last_level_update)
             if (now - last_level_update_dt).total_seconds() < 10:
+                _record_abuse('level_speed_hack', request.remote_addr, session_id,
+                             {'time_since_last': (now - last_level_update_dt).total_seconds()})
                 return jsonify({"error": "Level increment too fast!"}), 400
         session['last_level_update'] = now.isoformat()
 
@@ -476,6 +687,8 @@ def vocaguard_update():
         if last_floor_update:
             last_floor_update_dt = datetime.fromisoformat(last_floor_update)
             if (now - last_floor_update_dt).total_seconds() < 10:
+                _record_abuse('floor_speed_hack', request.remote_addr, session_id,
+                             {'time_since_last': (now - last_floor_update_dt).total_seconds()})
                 return jsonify({"error": "Floor increment too fast!"}), 400
         session['last_floor_update'] = now.isoformat()
 
@@ -508,6 +721,10 @@ def vocaguard_validate():
         # Do NOT pop or save sessions here!
         return jsonify({"result": "pass"}), 200
     else:
+        # Log validation mismatch as abuse attempt
+        _record_abuse('validate_mismatch', request.remote_addr, session_id,
+                     {'session_floor': session['floor'], 'session_level': session['level'],
+                      'submitted_floor': floor, 'submitted_level': level})
         return jsonify({"result": "fail", "reason": "Mismatch with tracked progress"}), 400
 
 # Get API status
@@ -537,12 +754,12 @@ def leaderboard():
                     entry['name'] = entry['name'].upper()
             return jsonify(leaderboard_data)
         except Exception as e:
+            log_error('leaderboard_get', e)
             return jsonify({"error": str(e)}), 500
     # POST: Update the leaderboard
     elif request.method == 'POST':
         try:
             new_entry = request.get_json() or {}
-            print("DEBUG: Received entry:", new_entry)
             if not new_entry or not isinstance(new_entry, dict):
                 log_rejection("Invalid data format", new_entry)
                 return jsonify({"error": "Invalid data format"}), 400
@@ -551,25 +768,16 @@ def leaderboard():
             if not all(field in new_entry for field in required_fields):
                 log_rejection("Missing required core fields", new_entry)
                 return jsonify({"error": f"Missing required fields: {required_fields}"}), 400
-            # Accept multiple possible captcha token keys: legacy 'hcaptcha_token', generic 'captcha_token'
-            captcha_token = (new_entry.get('captcha_token') or new_entry.get('hcaptcha_token'))
+            # Get captcha token from request (support both field names for compatibility)
+            captcha_token = new_entry.get('captcha_token') or new_entry.get('hcaptcha_token')
             if not captcha_token:
                 log_rejection("Captcha token missing", new_entry)
                 return jsonify({"error": "Captcha token missing"}), 400
-            if not verify_any_captcha(captcha_token, remote_ip=request.remote_addr):
+            if not verify_turnstile(captcha_token, remote_ip=request.remote_addr):
                 log_rejection("Captcha verification failed", new_entry)
                 return jsonify({"error": "Captcha verification failed"}), 400
             raw_name = new_entry['name']
             filtered_name = re.sub(r'<.*?>', '', raw_name).strip()
-            def clean_html(val):
-                if isinstance(val, str):
-                    val = re.sub(r'<.*?>', '', val)
-                    val = re.sub(r'(script|meta|iframe|onerror|onload|javascript:|http-equiv|src|href|alert|document|window)', '', val, flags=re.IGNORECASE)
-                    val = val.strip()
-                    val = val[:5]
-                    val = re.sub(r'[^A-Za-z0-9 ]', '', val)
-                    return val
-                return val
             new_entry['name'] = clean_html(new_entry['name'])
             filtered_name = new_entry['name']
             if not filtered_name:
@@ -578,9 +786,9 @@ def leaderboard():
             if re.search(r'[^A-Za-z0-9 ]', filtered_name):
                 log_rejection("Name contains invalid characters", new_entry)
                 return jsonify({"error": "Name contains invalid characters"}), 400
-            if len(filtered_name) > 5:
-                log_rejection("Name must be at most 5 characters", new_entry)
-                return jsonify({"error": "Name must be at most 5 characters"}), 400
+            if len(filtered_name) > MAX_LEADERBOARD_NAME_LENGTH:
+                log_rejection(f"Name must be at most {MAX_LEADERBOARD_NAME_LENGTH} characters", new_entry)
+                return jsonify({"error": f"Name must be at most {MAX_LEADERBOARD_NAME_LENGTH} characters"}), 400
             new_entry['name'] = filtered_name
             try:
                 floor_val = int(new_entry['floor'])
@@ -606,7 +814,7 @@ def leaderboard():
             sessions.pop(new_entry['session_id'], None)
             save_sessions(sessions)
             # Insert into SQLite and return sorted list
-            entry_to_store = {k: v for k, v in new_entry.items() if k not in ('session_id', 'hcaptcha_token', 'captcha_token')}
+            entry_to_store = {k: v for k, v in new_entry.items() if k not in ('session_id', 'captcha_token', 'hcaptcha_token')}
             conn = get_db_connection()
             cur = conn.cursor()
             cur.execute(
@@ -622,7 +830,7 @@ def leaderboard():
             conn.close()
             return jsonify({"message": "Leaderboard updated successfully", "data": leaderboard_data})
         except Exception as e:
-            print("DEBUG: Exception occurred:", e)
+            log_error('leaderboard_post', e, {'request_data': str(new_entry)})
             return jsonify({"error": str(e)}), 500
 
 # Get carrier pigeon inventory for session
@@ -792,53 +1000,40 @@ def pigeon_delivery():
         "remaining_queue_total": len(pigeons)
     }), 200
 
-# Get abuse status (admin only)
+# Get abuse status (whitelisted IPs only)
 @app.route('/api/abuse/status', methods=['GET'])
 def abuse_status():
-    # Optional admin endpoint
-    if not ABUSE_ADMIN_KEY:
-        return jsonify({"error": "Disabled"}), 404
-    key = request.args.get('key')
-    if key != ABUSE_ADMIN_KEY:
-        return jsonify({"error": "Forbidden"}), 403
+    # Whitelist-based access control
+    if not _is_ip_whitelisted(request.remote_addr):
+        log_error('abuse_status_unauthorized', Exception(f"Unauthorized IP access: {request.remote_addr}"))
+        return jsonify({"error": "Unauthorized"}), 403
+    
     try:
-        state = _load_abuse_state()
-        now_ts = int(datetime.utcnow().timestamp())
-        _prune_events(state, now_ts)
-        # Aggregate counts per IP (exclude raw extras)
+        # Load flagged IPs from flagged.json
+        flagged = _load_flagged_ips()
+        
+        # Get aggregated counts from vocaguard.json
+        recent_events = _load_vocaguard_events()
         agg = {}
-        for e in state['events']:
-            ip = e['ip']
-            metric = e['metric']
+        for e in recent_events:
+            ip = e.get('ip')
+            metric = e.get('metric')
             agg.setdefault(ip, {})[metric] = agg.setdefault(ip, {}).get(metric, 0) + 1
+        
         return jsonify({
-            'flagged': state.get('flagged', {}),
+            'flagged': flagged,
             'counts': agg,
-            'window_seconds': ABUSE_EVENT_WINDOW_SECONDS
+            'window_seconds': ABUSE_EVENT_WINDOW_SECONDS,
+            'vocaguard_events': recent_events
         })
     except Exception as e:
+        log_error('abuse_status', e)
         return jsonify({"error": str(e)}), 500
 
 # Utility Functions
 
-# Get hCaptcha secret from environment
-HCAPTCHA_SECRET = os.environ.get("HCAPTCHA_SECRET", "")
 # Get Turnstile secret from environment
 TURNSTILE_SECRET = os.environ.get("TURNSTILE_SECRET", "")
-
-# Verify hCaptcha token
-def verify_hcaptcha(token: str) -> bool:
-    if not token:
-        return False
-    url = "https://hcaptcha.com/siteverify"
-    data = {"secret": HCAPTCHA_SECRET, "response": token}
-    try:
-        resp = requests.post(url, data=data, timeout=5)
-        result = resp.json()
-        return bool(result.get("success"))
-    except Exception as e:
-        print(f"hCaptcha verification error: {e}")
-        return False
 
 # Verify Cloudflare Turnstile token
 def verify_turnstile(token: str, remote_ip: str = None) -> bool:
@@ -849,34 +1044,45 @@ def verify_turnstile(token: str, remote_ip: str = None) -> bool:
     if remote_ip:
         data["remoteip"] = remote_ip
     try:
-        resp = requests.post(url, data=data, timeout=5)
+        resp = requests.post(url, data=data, timeout=EXTERNAL_API_TIMEOUT_SECONDS)
         result = resp.json()
         return bool(result.get("success"))
     except Exception as e:
         print(f"Turnstile verification error: {e}")
         return False
 
-# Verify captcha using either hCaptcha or Turnstile
-def verify_any_captcha(token: str, remote_ip: str = None) -> bool:
-    # Try hCaptcha (legacy) first; if fails, attempt Turnstile if configured
-    if verify_hcaptcha(token):
-        return True
-    return verify_turnstile(token, remote_ip=remote_ip)
-
-# Clean HTML and scripts from string, enforce 5 char limit
-def clean_html(val):
-    # Cleans HTML/script from string and enforces 5 char limit
+# Clean HTML and scripts from string, enforce max length limit
+def clean_html(val: str) -> str:
+    """
+    Clean HTML/script tags and dangerous content from string.
+    
+    Args:
+        val: Input string to clean
+        
+    Returns:
+        Cleaned string limited to MAX_LEADERBOARD_NAME_LENGTH, alphanumeric + spaces only
+    """
+    # Cleans HTML/script from string and enforces MAX_LEADERBOARD_NAME_LENGTH limit
     if isinstance(val, str):
         val = re.sub(r'<.*?>', '', val)
         val = re.sub(r'(script|meta|iframe|onerror|onload|javascript:|http-equiv|src|href|alert|document|window)', '', val, flags=re.IGNORECASE)
         val = val.strip()
-        val = val[:5]
+        val = val[:MAX_LEADERBOARD_NAME_LENGTH]
         val = re.sub(r'[^A-Za-z0-9 ]', '', val)
         return val
     return val
 
 # Recursively clean JSON data
-def clean_json(obj):
+def clean_json(obj: any) -> any:
+    """
+    Recursively clean JSON data structure by sanitizing 'name' fields.
+    
+    Args:
+        obj: JSON object (dict, list, or scalar) to clean
+        
+    Returns:
+        Cleaned JSON object with same structure
+    """
     # Recursively clean leaderboard JSON
     if isinstance(obj, dict):
         return {k: clean_html(v) if k == 'name' else clean_json(v) for k, v in obj.items()}
@@ -885,13 +1091,11 @@ def clean_json(obj):
     else:
         return obj
 
-# Log rejection reason to database
-def log_rejection(reason, data):
-    # Append rejection event into abuse tracking database
+# Log rejection reason to vocaguard.json
+def log_rejection(reason: str, data: Optional[Dict]) -> None:
+    # Append rejection event to vocaguard.json
     try:
-        state = _load_abuse_state()
         now_ts = int(datetime.utcnow().timestamp())
-        _prune_events(state, now_ts)
         event = {
             'ts': now_ts,
             'ip': request.remote_addr,
@@ -904,21 +1108,10 @@ def log_rejection(reason, data):
                 'level': (data.get('level') if isinstance(data, dict) else None)
             }
         }
-        state['events'].append(event)
-        # Count captcha failures separately for flagging
-        if reason.lower().startswith('captcha'):
-            # Recompute counts for this IP to decide flagging
-            ip = request.remote_addr
-            window_events = [e for e in state['events'] if e.get('ip') == ip]
-            captcha_fails = sum(1 for e in window_events if (e.get('metric') == 'rejection' and str(e.get('reason','')).lower().startswith('captcha')))
-            if captcha_fails >= ABUSE_CAPTCHA_FAIL_THRESHOLD:
-                state.setdefault('flagged', {})[ip] = {
-                    'until': now_ts + ABUSE_FLAG_DURATION_SECONDS,
-                    'counts': {'captcha_fail': captcha_fails}
-                }
-        _save_abuse_state(state)
+        log_to_vocaguard_json(event)
     except Exception as e:
-        print(f"LOG REJECTION ERROR: {e}")
+        # Fail open; rejection logging failure should not block main flow
+        pass
 
 # Ensure session has inventory structure
 def _ensure_inventory(session: dict):
@@ -1009,22 +1202,28 @@ def _select_pigeon_for_delivery(pigeons: list, recipient_session: dict, sessions
 
 # Purge old sessions
 def purge_old_sessions():
-    # Delete sessions older than 30 days
-    cutoff = (datetime.utcnow() - timedelta(days=30)).isoformat()
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM sessions WHERE created < ?", (cutoff,))
-    conn.commit()
-    conn.close()
+    # Delete sessions older than SESSION_PURGE_AGE_DAYS with error handling
+    try:
+        cutoff = (datetime.utcnow() - timedelta(days=SESSION_PURGE_AGE_DAYS)).isoformat()
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM sessions WHERE created < ?", (cutoff,))
+        deleted_count = cur.rowcount
+        conn.commit()
+        conn.close()
+        if deleted_count > 0:
+            print(f"Purged {deleted_count} old sessions")
+    except Exception as e:
+        log_error('purge_old_sessions', e)
 
 def session_purge_worker():
-    # Background thread to purge old sessions every 24 hours
+    # Background thread to purge old sessions every BACKGROUND_WORKER_SLEEP_SECONDS
     while True:
         try:
             purge_old_sessions()
         except Exception as e:
-            print(f"Session purge error: {e}")
-        time.sleep(24 * 60 * 60)  # Sleep for 24 hours
+            log_error('session_purge_worker', e)
+        time.sleep(BACKGROUND_WORKER_SLEEP_SECONDS)
 
 # Start the purge thread when the app starts
 purge_thread = threading.Thread(target=session_purge_worker, daemon=True)

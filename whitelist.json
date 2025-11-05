@@ -1,0 +1,8 @@
+{
+  "ips": [
+    "127.0.0.1",
+    "::1"
+  ],
+  "updated": "2025-11-04T00:00:00.000000",
+  "_comment": "Add your admin IP addresses here to grant access to /api/abuse/status. Only requests from these IPs will be allowed."
+}
