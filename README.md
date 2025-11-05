@@ -7,7 +7,7 @@ A Flask-based REST API for the TardQuest game featuring anti-cheat protection, l
 - **VocaGuard Anti-Cheat**: Session-based progress validation with rate limiting
 - **Leaderboard**: Player rankings with captcha protection
 - **Carrier Pigeon Messaging**: Proximity-based message delivery between players
-- **SQLite Database**: Persistent storage for sessions, messages, and abuse tracking
+- **SQLite Database**: Persistent storage for sessions, leaderboard, and messages.
 - **Rate Limiting**: Protection against spam and abuse
 
 ## Quick Start
