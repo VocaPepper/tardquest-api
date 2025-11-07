@@ -21,7 +21,7 @@ A Flask-based REST API for the TardQuest game featuring anti-cheat protection, l
 
 1. **Clone the repository**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/VocaPepper/tardquest-api.git
    cd tardquest-api
    ```
 
@@ -37,7 +37,7 @@ A Flask-based REST API for the TardQuest game featuring anti-cheat protection, l
    TURNSTILE_SECRET=your_turnstile_secret_key
    ```
 
-4. **Run the API**
+4. **Run the API (Development Server)**
    ```bash
    python TardQuest_API.py
    ```
@@ -80,10 +80,11 @@ The `/api/abuse/status` endpoint is protected by IP whitelisting. Whitelisted IP
 ```json
 {
   "ips": [
-    "192.168.1.100",
-    "203.0.113.45"
+    "127.0.0.1",
+    "::1"
   ],
-  "updated": "2025-11-04T12:00:00.000000"
+  "updated": "2025-11-04T00:00:00.000000",
+  "_comment": "Add your admin IP addresses here to grant access to /api/abuse/status. Only requests from these IPs will be allowed."
 }
 ```
 
@@ -113,13 +114,6 @@ Error and rejection logs are stored as JSON files:
 - `log.json` - General server errors and other non-VocaGuard issues
 - `flagged.json` - Flagged IP addresses with expiration times and abuse metric counts
 - `whitelist.json` - IP addresses allowed to access admin endpoints (e.g., `/api/abuse/status`)
-
-## Development
-
-Run in debug mode (for development only):
-```python
-app.run(debug=True, host='0.0.0.0', port=9601)
-```
 
 ## License
 
