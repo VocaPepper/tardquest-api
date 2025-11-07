@@ -90,6 +90,41 @@ The `/api/abuse/status` endpoint is protected by IP whitelisting. Whitelisted IP
 
 Only requests from whitelisted IP addresses will be granted access to abuse metrics. Unauthorized access attempts are logged to `log.json`.
 
+## Client Configuration
+
+The TardQuest client (JavaScript) communicates with this API and requires the following configuration:
+
+### TardBoard (Leaderboard + Anti-Cheat Integration)
+
+The `tardboard.js` client module manages leaderboard submissions with anti-cheat validation:
+
+```javascript
+// API Configuration
+const API_BASE = 'http://your-domain-or-ip:9601';
+
+// Cloudflare Turnstile Captcha
+const TURNSTILE_SITE_KEY = 'your-site-key';
+```
+
+### Carrier Pigeon (Messaging System)
+
+The `pigeon.js` client module implements the messaging system:
+
+```javascript
+// API Configuration
+const API_BASE = 'http://your-domain-or-ip:9601';
+```
+
+And in `game.html`, under `const merchant`:
+
+```javascript
+fetch('http://your-domain-or-ip:9601/api/pigeon/purchase', {
+   method: 'POST',
+   headers: { 'Content-Type': 'application/json' },
+   body: JSON.stringify({ session_id: sessionId })
+})
+```
+
 Key settings in `TardQuest_API.py`:
 
 - **Session Timeout**: 120 minutes (resets on update)
