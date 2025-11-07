@@ -126,33 +126,6 @@ init_db()
 
 # Session management helper functions
 
-# Load sessions from database
-def load_sessions() -> Dict[str, Dict]:
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute('SELECT session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified FROM sessions')
-        rows = cur.fetchall()
-        conn.close()
-        sessions = {}
-        for r in rows:
-            sessions[r[0]] = {
-                'floor': int(r[1]),
-                'level': int(r[2]),
-                'expires': r[3],
-                'created': r[4],
-                'inv': (json.loads(r[5]) if r[5] else {}),
-                'last_level_update': r[6],
-                'last_floor_update': r[7],
-                'last_message_received_at': r[8],
-                'last_from_session_delivered': r[9],
-                'verified': bool(r[10])
-            }
-        return sessions
-    except Exception as e:
-        log_error('load_sessions', e)
-        return {}
-
 # Save a single session to database (atomic operation, thread-safe)
 def save_session(session_id: str, session: Dict[str, any]) -> None:
     """
@@ -186,47 +159,7 @@ def save_session(session_id: str, session: Dict[str, any]) -> None:
     except Exception as e:
         log_error('save_session', e, {'session_id': session_id})
 
-# Save sessions to database (batch operation)
-def save_sessions(sessions: Dict[str, Dict]) -> None:
-    """
-    Save multiple sessions to database. Uses atomic per-session inserts.
-    
-    Args:
-        sessions: Dictionary mapping session_ids to session data
-    """
-    try:
-        for session_id, session in sessions.items():
-            save_session(session_id, session)
-    except Exception as e:
-        log_error('save_sessions', e, {'session_count': len(sessions)})
-
 # Load pigeons from database
-def load_pigeons() -> List[Dict]:
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        # Preserve append order by created timestamp
-        cur.execute('SELECT id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to FROM pigeons ORDER BY datetime(created) ASC')
-        rows = cur.fetchall()
-        conn.close()
-        pigeons = []
-        for r in rows:
-            pigeons.append({
-                'id': r[0],
-                'text': r[1],
-                'from_session': r[2],
-                'from_floor': int(r[3]),
-                'from_level': int(r[4]),
-                'from_verified': bool(r[5]),
-                'created': r[6],
-                'delivered': bool(r[7]),
-                'delivered_at': r[8],
-                'delivered_to': r[9],
-            })
-        return pigeons
-    except Exception as e:
-        log_error('load_pigeons', e)
-        return []
 
 # Save a single pigeon to database (atomic operation, thread-safe)
 def save_pigeon(pigeon: Dict[str, any]) -> None:
@@ -258,20 +191,6 @@ def save_pigeon(pigeon: Dict[str, any]) -> None:
         conn.close()
     except Exception as e:
         log_error('save_pigeon', e, {'pigeon_id': pigeon.get('id')})
-
-# Save pigeons to database (batch operation)
-def save_pigeons(pigeons: List[Dict]) -> None:
-    """
-    Save multiple pigeon messages to database. Uses atomic per-pigeon inserts.
-    
-    Args:
-        pigeons: List of pigeon message dictionaries
-    """
-    try:
-        for p in pigeons:
-            save_pigeon(p)
-    except Exception as e:
-        log_error('save_pigeons', e, {'pigeon_count': len(pigeons)})
 
 # --- Optimized Per-Session Database Functions (No Full-Table Fetch) ---
 
@@ -405,10 +324,6 @@ def delete_session(session_id: str) -> bool:
     except Exception as e:
         log_error('delete_session', e, {'session_id': session_id})
         return False
-
-# Get pending (undelivered) pigeons
-def _pending_pigeons(pigeons):
-    return [p for p in pigeons if not p.get("delivered")]
 
 # --- Optimized Per-Pigeon Database Functions (No Full-Table Fetch) ---
 
@@ -559,41 +474,6 @@ ABUSE_CAPTCHA_FAIL_THRESHOLD = 2
 ABUSE_FLAG_DURATION_SECONDS = 3600  # 1 hour flag
 
 # --- Helper Functions for API Responses ---
-
-def error_response(message: str, status_code: int = 400, extra: Optional[Dict] = None) -> Tuple:
-    """
-    Create a standardized error response.
-    
-    Args:
-        message: Error message to return to client
-        status_code: HTTP status code (default: 400)
-        extra: Optional dictionary to merge into response
-        
-    Returns:
-        Tuple of (JSON response, status code)
-    """
-    response = {"error": message}
-    if extra:
-        response.update(extra)
-    return jsonify(response), status_code
-
-
-def success_response(data: Dict, message: Optional[str] = None, status_code: int = 200) -> Tuple:
-    """
-    Create a standardized success response.
-    
-    Args:
-        data: Data dictionary to return to client
-        message: Optional message to include in response
-        status_code: HTTP status code (default: 200)
-        
-    Returns:
-        Tuple of (JSON response, status code)
-    """
-    response = {"success": True, **data}
-    if message:
-        response["message"] = message
-    return jsonify(response), status_code
 
 # Log to vocaguard.json for VocaGuard-related errors and rejections
 def log_to_vocaguard_json(event: Dict) -> None:
@@ -1580,33 +1460,6 @@ def _message_weight(msg: dict, recipient_session: dict, sessions: dict) -> float
         weight *= REPEAT_SENDER_PENALTY  # avoid same sender twice in a row
     weight *= random.uniform(RANDOM_JITTER_MIN, RANDOM_JITTER_MAX)  # jitter
     return max(weight, 0.0)
-
-# Select an undelivered pigeon (not from recipient) using weighted random with proximity preference
-def _select_pigeon_for_delivery(pigeons: list, recipient_session: dict, sessions: dict):
-    session_id = recipient_session.get("id") or recipient_session.get("session_id")
-    all_candidates = []
-    close_candidates = []
-    rec_floor = int(recipient_session.get("floor", 0))
-    for idx, p in enumerate(pigeons):
-        if p.get("delivered"):
-            continue
-        if p.get("from_session") == session_id:
-            continue
-        all_candidates.append((idx, p))
-        s_floor, _, _ = _sender_progress_for_msg(p, sessions)
-        if abs(s_floor - rec_floor) <= FLOOR_PROXIMITY_RANGE:
-            close_candidates.append((idx, p))
-    pool = close_candidates if close_candidates else all_candidates
-    if not pool:
-        return None, None
-    weights = [
-        _message_weight(p, recipient_session, sessions)
-        for _, p in pool
-    ]
-    if sum(weights) <= 0:
-        return pool[0][0], pool[0][1]
-    pick = random.choices(population=pool, weights=weights, k=1)[0]
-    return pick[0], pick[1]
 
 # Purge old sessions
 def purge_old_sessions():
