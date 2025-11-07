@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 import traceback
+from threading import Lock
 
 # Load environment variables from .env file
 load_dotenv()
@@ -24,7 +25,18 @@ load_dotenv()
 # Initialize Flask application
 app = Flask(__name__)
 # Enable CORS for specified origins to allow cross-origin requests
-CORS(app)
+CORS(app, origins=["http://localhost:5500", "http://localhost:9599", "https://vocapepper.com", "https://milklounge.wang", "https://uploads.ungrounded.net"])
+# 5500: Used for local development, change as needed
+# 9599: Used for Electron app in production
+
+# --- Thread Safety ---
+# Locks for concurrent access to JSON log files
+vocaguard_log_lock = Lock()
+general_log_lock = Lock()
+flagged_ips_lock = Lock()
+whitelist_lock = Lock()
+# Per-session lock to prevent race conditions on concurrent updates
+session_ops_lock = Lock()
 
 # --- Application Configuration Constants ---
 # Database connection timeout in seconds
@@ -141,32 +153,50 @@ def load_sessions() -> Dict[str, Dict]:
         log_error('load_sessions', e)
         return {}
 
-# Save sessions to database
-def save_sessions(sessions: Dict[str, Dict]) -> None:
-    # Replace-all approach keeps the rest of the code unchanged
+# Save a single session to database (atomic operation, thread-safe)
+def save_session(session_id: str, session: Dict[str, any]) -> None:
+    """
+    Save a single session to database using atomic INSERT OR REPLACE.
+    
+    Args:
+        session_id: The session identifier
+        session: Dictionary containing session data
+    """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute('DELETE FROM sessions')
-        for sid, s in sessions.items():
-            cur.execute(
-                'INSERT OR REPLACE INTO sessions (session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                (
-                    sid,
-                    int(s.get('floor', 1)),
-                    int(s.get('level', 1)),
-                    s.get('expires', ''),
-                    s.get('created', ''),
-                    json.dumps(s.get('inv', {})),
-                    s.get('last_level_update'),
-                    s.get('last_floor_update'),
-                    s.get('last_message_received_at'),
-                    s.get('last_from_session_delivered'),
-                    1 if s.get('verified') else 0,
-                )
+        cur.execute(
+            'INSERT OR REPLACE INTO sessions (session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (
+                session_id,
+                int(session.get('floor', 1)),
+                int(session.get('level', 1)),
+                session.get('expires', ''),
+                session.get('created', ''),
+                json.dumps(session.get('inv', {})),
+                session.get('last_level_update'),
+                session.get('last_floor_update'),
+                session.get('last_message_received_at'),
+                session.get('last_from_session_delivered'),
+                1 if session.get('verified') else 0,
             )
+        )
         conn.commit()
         conn.close()
+    except Exception as e:
+        log_error('save_session', e, {'session_id': session_id})
+
+# Save sessions to database (batch operation)
+def save_sessions(sessions: Dict[str, Dict]) -> None:
+    """
+    Save multiple sessions to database. Uses atomic per-session inserts.
+    
+    Args:
+        sessions: Dictionary mapping session_ids to session data
+    """
+    try:
+        for session_id, session in sessions.items():
+            save_session(session_id, session)
     except Exception as e:
         log_error('save_sessions', e, {'session_count': len(sessions)})
 
@@ -198,36 +228,297 @@ def load_pigeons() -> List[Dict]:
         log_error('load_pigeons', e)
         return []
 
-# Save pigeons to database
-def save_pigeons(pigeons: List[Dict]) -> None:
+# Save a single pigeon to database (atomic operation, thread-safe)
+def save_pigeon(pigeon: Dict[str, any]) -> None:
+    """
+    Save a single pigeon message to database using atomic INSERT OR REPLACE.
+    
+    Args:
+        pigeon: Dictionary containing pigeon message data
+    """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute('DELETE FROM pigeons')
-        for p in pigeons:
-            cur.execute(
-                'INSERT OR REPLACE INTO pigeons (id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                (
-                    p.get('id') or str(uuid.uuid4()),
-                    p.get('text', ''),
-                    p.get('from_session', ''),
-                    int(p.get('from_floor', 0)),
-                    int(p.get('from_level', 0)),
-                    1 if p.get('from_verified') else 0,
-                    p.get('created', datetime.utcnow().isoformat()),
-                    1 if p.get('delivered') else 0,
-                    p.get('delivered_at'),
-                    p.get('delivered_to'),
-                )
+        cur.execute(
+            'INSERT OR REPLACE INTO pigeons (id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (
+                pigeon.get('id') or str(uuid.uuid4()),
+                pigeon.get('text', ''),
+                pigeon.get('from_session', ''),
+                int(pigeon.get('from_floor', 0)),
+                int(pigeon.get('from_level', 0)),
+                1 if pigeon.get('from_verified') else 0,
+                pigeon.get('created', datetime.utcnow().isoformat()),
+                1 if pigeon.get('delivered') else 0,
+                pigeon.get('delivered_at'),
+                pigeon.get('delivered_to'),
             )
+        )
         conn.commit()
         conn.close()
     except Exception as e:
+        log_error('save_pigeon', e, {'pigeon_id': pigeon.get('id')})
+
+# Save pigeons to database (batch operation)
+def save_pigeons(pigeons: List[Dict]) -> None:
+    """
+    Save multiple pigeon messages to database. Uses atomic per-pigeon inserts.
+    
+    Args:
+        pigeons: List of pigeon message dictionaries
+    """
+    try:
+        for p in pigeons:
+            save_pigeon(p)
+    except Exception as e:
         log_error('save_pigeons', e, {'pigeon_count': len(pigeons)})
+
+# --- Optimized Per-Session Database Functions (No Full-Table Fetch) ---
+
+def get_session_by_id(session_id: str) -> Optional[Dict]:
+    """
+    Fetch a single session from database without loading entire table.
+    
+    Args:
+        session_id: The session identifier
+        
+    Returns:
+        Session dictionary or None if not found
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified FROM sessions WHERE session_id = ?', (session_id,))
+        row = cur.fetchone()
+        conn.close()
+        
+        if not row:
+            return None
+        
+        return {
+            'session_id': row[0],
+            'floor': int(row[1]),
+            'level': int(row[2]),
+            'expires': row[3],
+            'created': row[4],
+            'inv': json.loads(row[5]) if row[5] else {},
+            'last_level_update': row[6],
+            'last_floor_update': row[7],
+            'last_message_received_at': row[8],
+            'last_from_session_delivered': row[9],
+            'verified': bool(row[10])
+        }
+    except Exception as e:
+        log_error('get_session_by_id', e, {'session_id': session_id})
+        return None
+
+def update_session(session_id: str, updates: Dict) -> bool:
+    """
+    Update a single session in database using atomic UPDATE.
+    No full-table fetch needed.
+    
+    Args:
+        session_id: The session identifier
+        updates: Dictionary of fields to update (only these are modified)
+        
+    Returns:
+        True if successful, False on error
+    """
+    try:
+        with session_ops_lock:  # Prevent concurrent updates to same session
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            # Build dynamic UPDATE statement based on provided fields
+            set_clauses = []
+            params = []
+            
+            if 'floor' in updates:
+                set_clauses.append('floor = ?')
+                params.append(int(updates['floor']))
+            if 'level' in updates:
+                set_clauses.append('level = ?')
+                params.append(int(updates['level']))
+            if 'expires' in updates:
+                set_clauses.append('expires = ?')
+                params.append(updates['expires'])
+            if 'inv' in updates:
+                set_clauses.append('inv = ?')
+                params.append(json.dumps(updates['inv']))
+            if 'last_level_update' in updates:
+                set_clauses.append('last_level_update = ?')
+                params.append(updates['last_level_update'])
+            if 'last_floor_update' in updates:
+                set_clauses.append('last_floor_update = ?')
+                params.append(updates['last_floor_update'])
+            if 'last_message_received_at' in updates:
+                set_clauses.append('last_message_received_at = ?')
+                params.append(updates['last_message_received_at'])
+            if 'last_from_session_delivered' in updates:
+                set_clauses.append('last_from_session_delivered = ?')
+                params.append(updates['last_from_session_delivered'])
+            if 'verified' in updates:
+                set_clauses.append('verified = ?')
+                params.append(1 if updates['verified'] else 0)
+            
+            if not set_clauses:
+                conn.close()
+                return True  # Nothing to update
+            
+            # Add session_id as final parameter
+            params.append(session_id)
+            
+            sql = f'UPDATE sessions SET {", ".join(set_clauses)} WHERE session_id = ?'
+            cur.execute(sql, tuple(params))
+            
+            if cur.rowcount == 0:
+                # Session doesn't exist, try INSERT instead
+                conn.commit()
+                conn.close()
+                return False
+            
+            conn.commit()
+            conn.close()
+            return True
+    except Exception as e:
+        log_error('update_session', e, {'session_id': session_id, 'updates': list(updates.keys())})
+        return False
+
+def delete_session(session_id: str) -> bool:
+    """
+    Delete a single session from database.
+    
+    Args:
+        session_id: The session identifier
+        
+    Returns:
+        True if successful
+    """
+    try:
+        with session_ops_lock:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('DELETE FROM sessions WHERE session_id = ?', (session_id,))
+            conn.commit()
+            conn.close()
+            return True
+    except Exception as e:
+        log_error('delete_session', e, {'session_id': session_id})
+        return False
 
 # Get pending (undelivered) pigeons
 def _pending_pigeons(pigeons):
     return [p for p in pigeons if not p.get("delivered")]
+
+# --- Optimized Per-Pigeon Database Functions (No Full-Table Fetch) ---
+
+def get_pending_pigeon_for_delivery(recipient_floor: int, recipient_session_id: str, exclude_recent_sender: Optional[str] = None) -> Optional[Dict]:
+    """
+    Fetch a single undelivered pigeon optimized for delivery.
+    Uses weighted random selection with proximity preference.
+    Does NOT load entire table.
+    
+    Args:
+        recipient_floor: Recipient's current floor
+        recipient_session_id: Recipient's session ID
+        exclude_recent_sender: Session ID to deprioritize (last sender)
+        
+    Returns:
+        Single pigeon dictionary or None
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Get undelivered pigeons not from this recipient
+        cur.execute('''
+            SELECT id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to
+            FROM pigeons 
+            WHERE delivered = 0 AND from_session != ?
+            LIMIT 100
+        ''', (recipient_session_id,))
+        
+        rows = cur.fetchall()
+        conn.close()
+        
+        if not rows:
+            return None
+        
+        # Convert to dicts
+        candidates = []
+        for r in rows:
+            candidates.append({
+                'id': r[0],
+                'text': r[1],
+                'from_session': r[2],
+                'from_floor': int(r[3]),
+                'from_level': int(r[4]),
+                'from_verified': bool(r[5]),
+                'created': r[6],
+                'delivered': bool(r[7]),
+                'delivered_at': r[8],
+                'delivered_to': r[9],
+            })
+        
+        # Apply weighting logic (proximity, age, etc.)
+        weights = [_message_weight(p, {'floor': recipient_floor}, {}) for p in candidates]
+        
+        if sum(weights) <= 0:
+            return candidates[0] if candidates else None
+        
+        selected = random.choices(candidates, weights=weights, k=1)[0]
+        return selected
+    except Exception as e:
+        log_error('get_pending_pigeon_for_delivery', e)
+        return None
+
+def mark_pigeon_delivered(pigeon_id: str, delivered_to_session: str) -> bool:
+    """
+    Mark a pigeon as delivered without rewriting entire dataset.
+    Uses atomic UPDATE.
+    
+    Args:
+        pigeon_id: The pigeon ID
+        delivered_to_session: Session ID that received it
+        
+    Returns:
+        True if successful
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            'UPDATE pigeons SET delivered = 1, delivered_at = ?, delivered_to = ? WHERE id = ?',
+            (datetime.utcnow().isoformat(), delivered_to_session, pigeon_id)
+        )
+        conn.commit()
+        conn.close()
+        return cur.rowcount > 0
+    except Exception as e:
+        log_error('mark_pigeon_delivered', e, {'pigeon_id': pigeon_id})
+        return False
+
+def get_pending_pigeon_count(session_id: str) -> int:
+    """
+    Get count of undelivered pigeons from a specific session.
+    Does NOT load full table.
+    
+    Args:
+        session_id: The session identifier
+        
+    Returns:
+        Count of pending pigeons
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM pigeons WHERE from_session = ? AND delivered = 0', (session_id,))
+        count = cur.fetchone()[0]
+        conn.close()
+        return count
+    except Exception as e:
+        log_error('get_pending_pigeon_count', e, {'session_id': session_id})
+        return 0
 
 # Session timeout in minutes
 SESSION_TIMEOUT_MINUTES = 120 # 2 hours timeout for sessions (resets on vocaguard update)
@@ -307,46 +598,48 @@ def success_response(data: Dict, message: Optional[str] = None, status_code: int
 # Log to vocaguard.json for VocaGuard-related errors and rejections
 def log_to_vocaguard_json(event: Dict) -> None:
     """
-    Log an abuse/VocaGuard event to vocaguard.json.
+    Log an abuse/VocaGuard event to vocaguard.json with thread-safe file locking.
     
     Args:
         event: Dictionary containing event data (ts, ip, metric, etc.)
     """
     vocaguard_log_file = os.path.join(os.path.dirname(__file__), "vocaguard.json")
     try:
-        # Load existing logs or start fresh
-        logs = []
-        if os.path.exists(vocaguard_log_file):
-            with open(vocaguard_log_file, 'r') as f:
-                logs = json.load(f)
-        # Append new event
-        logs.append(event)
-        # Write back
-        with open(vocaguard_log_file, 'w') as f:
-            json.dump(logs, f, indent=2)
+        with vocaguard_log_lock:
+            # Load existing logs or start fresh
+            logs = []
+            if os.path.exists(vocaguard_log_file):
+                with open(vocaguard_log_file, 'r') as f:
+                    logs = json.load(f)
+            # Append new event
+            logs.append(event)
+            # Write back
+            with open(vocaguard_log_file, 'w') as f:
+                json.dump(logs, f, indent=2)
     except Exception as e:
         print(f"VOCAGUARD LOG ERROR: {e}")
 
 # Log to log.json for general server errors
 def log_to_general_json(event: Dict) -> None:
     """
-    Log a general server error to log.json.
+    Log a general server error to log.json with thread-safe file locking.
     
     Args:
         event: Dictionary containing error event data (error, traceback, etc.)
     """
     log_file = os.path.join(os.path.dirname(__file__), "log.json")
     try:
-        # Load existing logs or start fresh
-        logs = []
-        if os.path.exists(log_file):
-            with open(log_file, 'r') as f:
-                logs = json.load(f)
-        # Append new event
-        logs.append(event)
-        # Write back
-        with open(log_file, 'w') as f:
-            json.dump(logs, f, indent=2)
+        with general_log_lock:
+            # Load existing logs or start fresh
+            logs = []
+            if os.path.exists(log_file):
+                with open(log_file, 'r') as f:
+                    logs = json.load(f)
+            # Append new event
+            logs.append(event)
+            # Write back
+            with open(log_file, 'w') as f:
+                json.dump(logs, f, indent=2)
     except Exception as e:
         print(f"GENERAL LOG ERROR: {e}")
 
@@ -398,71 +691,75 @@ def _load_vocaguard_events() -> List[Dict]:
 # Load flagged IPs from flagged.json
 def _load_flagged_ips() -> Dict[str, Dict]:
     """
-    Load flagged (banned) IPs from flagged.json.
+    Load flagged (banned) IPs from flagged.json with thread-safe file locking.
     
     Returns:
         Dictionary mapping IP addresses to their flag information (expiry, counts)
     """
     flagged_file = os.path.join(os.path.dirname(__file__), "flagged.json")
     flagged = {}
-    if os.path.exists(flagged_file):
-        try:
-            with open(flagged_file, 'r') as f:
-                flagged = json.load(f)
-        except Exception as e:
-            log_error('load_flagged_ips', e)
+    try:
+        with flagged_ips_lock:
+            if os.path.exists(flagged_file):
+                with open(flagged_file, 'r') as f:
+                    flagged = json.load(f)
+    except Exception as e:
+        log_error('load_flagged_ips', e)
     return flagged
 
 # Save flagged IPs to flagged.json
 def _save_flagged_ips(flagged: Dict[str, Dict]) -> None:
     """
-    Save flagged IPs dictionary to flagged.json.
+    Save flagged IPs dictionary to flagged.json with thread-safe file locking.
     
     Args:
         flagged: Dictionary mapping IPs to flag information
     """
     flagged_file = os.path.join(os.path.dirname(__file__), "flagged.json")
     try:
-        with open(flagged_file, 'w') as f:
-            json.dump(flagged, f, indent=2)
+        with flagged_ips_lock:
+            with open(flagged_file, 'w') as f:
+                json.dump(flagged, f, indent=2)
     except Exception as e:
         log_error('save_flagged_ips', e)
 
 # Load whitelisted IPs from whitelist.json
 def _load_whitelist() -> List[str]:
     """
-    Load admin whitelisted IPs from whitelist.json.
+    Load admin whitelisted IPs from whitelist.json with thread-safe file locking.
     
     Returns:
         List of whitelisted IP address strings
     """
     whitelist_file = os.path.join(os.path.dirname(__file__), "whitelist.json")
     whitelist = []
-    if os.path.exists(whitelist_file):
-        try:
-            with open(whitelist_file, 'r') as f:
-                data = json.load(f)
-                # Support both list format and object format
-                if isinstance(data, list):
-                    whitelist = data
-                elif isinstance(data, dict) and 'ips' in data:
-                    whitelist = data['ips']
-        except Exception as e:
-            log_error('load_whitelist', e)
+    try:
+        with whitelist_lock:
+            if os.path.exists(whitelist_file):
+                with open(whitelist_file, 'r') as f:
+                    data = json.load(f)
+                    # Support both list format and object format
+                    if isinstance(data, list):
+                        whitelist = data
+                    elif isinstance(data, dict) and 'ips' in data:
+                        whitelist = data['ips']
+    except Exception as e:
+        log_error('load_whitelist', e)
     return whitelist
 
 # Save whitelisted IPs to whitelist.json
 def _save_whitelist(whitelist: List[str]) -> None:
     """
-    Save whitelisted IPs list to whitelist.json.
+    Save whitelisted IPs list to whitelist.json with thread-safe file locking.
     
     Args:
         whitelist: List of IP address strings to whitelist
     """
     whitelist_file = os.path.join(os.path.dirname(__file__), "whitelist.json")
     try:
-        with open(whitelist_file, 'w') as f:
-            json.dump({'ips': whitelist, 'updated': datetime.utcnow().isoformat()}, f, indent=2)
+        with whitelist_lock:
+            with open(whitelist_file, 'w') as f:
+                json.dump({'ips': whitelist, 'updated': datetime.utcnow().isoformat()}, f, indent=2)
     except Exception as e:
         log_error('save_whitelist', e)
 
@@ -608,16 +905,23 @@ limiter = Limiter(
 def vocaguard_start():
     # Starts a new anti-cheat session and returns session_id
     session_id = str(uuid.uuid4())
-    sessions = load_sessions()
     expires = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
-    sessions[session_id] = _ensure_inventory({
+    
+    # Use save_session (atomic) instead of load_sessions/save_sessions pattern
+    new_session = {
+        "session_id": session_id,
         "floor": 1,
         "level": 1,
         "expires": expires,
         "created": datetime.utcnow().isoformat(),
-        "inv": {"carrierPigeon": 0}
-    })
-    save_sessions(sessions)
+        "inv": {"carrierPigeon": 0},
+        "last_level_update": None,
+        "last_floor_update": None,
+        "last_message_received_at": None,
+        "last_from_session_delivered": None,
+        "verified": False
+    }
+    save_session(session_id, new_session)
 
     return jsonify({
         "session_id": session_id,
@@ -630,17 +934,29 @@ def vocaguard_update():
     # Updates session progress with anti-cheat validation
     data = request.get_json() or {}
     session_id = data.get('session_id')
-    floor = data.get('floor')
-    level = data.get('level')
-    sessions = load_sessions()
-    session = sessions.get(session_id)
+    
+    # VALIDATE TYPES EARLY to prevent TypeError (type safety fix)
+    try:
+        floor = int(data.get('floor', 0))
+        level = int(data.get('level', 0))
+    except (ValueError, TypeError):
+        _record_abuse('invalid_progress_type', request.remote_addr, session_id,
+                     {'floor_val': data.get('floor'), 'level_val': data.get('level')})
+        return jsonify({"error": "Floor and level must be valid integers"}), 400
+    
+    # Fetch only this session (no full-table load)
+    session = get_session_by_id(session_id)
     if not session:
+        _record_abuse('invalid_session', request.remote_addr, session_id, 
+                     {'attempted_session': session_id})
         return jsonify({"error": "Invalid session token"}), 400
+    
     # Check expiration
     if datetime.fromisoformat(session['expires']) < datetime.utcnow():
-        sessions.pop(session_id, None)
-        save_sessions(sessions)
+        _record_abuse('session_expired', request.remote_addr, session_id)
+        delete_session(session_id)
         return jsonify({"error": "Session expired"}), 400
+    
     current_floor = session['floor']
     current_level = session['level']
     
@@ -680,7 +996,9 @@ def vocaguard_update():
                 _record_abuse('level_speed_hack', request.remote_addr, session_id,
                              {'time_since_last': (now - last_level_update_dt).total_seconds()})
                 return jsonify({"error": "Level increment too fast!"}), 400
-        session['last_level_update'] = now.isoformat()
+        last_level_update = now.isoformat()
+    else:
+        last_level_update = session.get('last_level_update')
 
     # Enforce minimum 10 seconds between floor increments
     if floor > current_floor:
@@ -690,14 +1008,19 @@ def vocaguard_update():
                 _record_abuse('floor_speed_hack', request.remote_addr, session_id,
                              {'time_since_last': (now - last_floor_update_dt).total_seconds()})
                 return jsonify({"error": "Floor increment too fast!"}), 400
-        session['last_floor_update'] = now.isoformat()
+        last_floor_update = now.isoformat()
+    else:
+        last_floor_update = session.get('last_floor_update')
 
-    # Update session progress only if valid
-    session['floor'] = floor
-    session['level'] = level
-    session['expires'] = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
-    sessions[session_id] = session
-    save_sessions(sessions)
+    # Update session progress only if valid (targeted UPDATE, not full rewrite)
+    new_expires = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
+    update_session(session_id, {
+        'floor': floor,
+        'level': level,
+        'expires': new_expires,
+        'last_level_update': last_level_update,
+        'last_floor_update': last_floor_update
+    })
 
     return jsonify({"status": "updated"}), 200
 
@@ -707,18 +1030,30 @@ def vocaguard_validate():
     # Validates final submission before leaderboard post
     data = request.get_json() or {}
     session_id = data.get('session_id')
-    floor = data.get('floor')
-    level = data.get('level')
-    sessions = load_sessions()
-    session = sessions.get(session_id)
+    
+    # VALIDATE TYPES EARLY (type safety fix)
+    try:
+        floor = int(data.get('floor', 0))
+        level = int(data.get('level', 0))
+    except (ValueError, TypeError):
+        _record_abuse('invalid_progress_type', request.remote_addr, session_id,
+                     {'floor_val': data.get('floor'), 'level_val': data.get('level')})
+        return jsonify({"result": "fail", "reason": "Floor and level must be valid integers"}), 400
+    
+    # Fetch only this session (no full-table load)
+    session = get_session_by_id(session_id)
     if not session:
+        _record_abuse('invalid_session', request.remote_addr, session_id, 
+                     {'attempted_session': session_id})
         return jsonify({"result": "fail", "reason": "Invalid session"}), 400
+    
     if datetime.fromisoformat(session['expires']) < datetime.utcnow():
-        sessions.pop(session_id, None)
-        save_sessions(sessions)
+        _record_abuse('session_expired', request.remote_addr, session_id)
+        delete_session(session_id)
         return jsonify({"result": "fail", "reason": "Session expired"}), 400
+    
     if session['floor'] == floor and session['level'] == level:
-        # Do NOT pop or save sessions here!
+        # Do NOT delete or expire sessions here!
         return jsonify({"result": "pass"}), 200
     else:
         # Log validation mismatch as abuse attempt
@@ -772,9 +1107,12 @@ def leaderboard():
             captcha_token = new_entry.get('captcha_token') or new_entry.get('hcaptcha_token')
             if not captcha_token:
                 log_rejection("Captcha token missing", new_entry)
+                _record_abuse('captcha_missing', request.remote_addr, new_entry.get('session_id'))
                 return jsonify({"error": "Captcha token missing"}), 400
             if not verify_turnstile(captcha_token, remote_ip=request.remote_addr):
                 log_rejection("Captcha verification failed", new_entry)
+                _record_abuse('captcha_fail', request.remote_addr, new_entry.get('session_id'),
+                             {'reason': 'captcha_verification_failed'})
                 return jsonify({"error": "Captcha verification failed"}), 400
             raw_name = new_entry['name']
             filtered_name = re.sub(r'<.*?>', '', raw_name).strip()
@@ -798,21 +1136,29 @@ def leaderboard():
                 return jsonify({"error": "Floor and level must be valid numbers"}), 400
             new_entry['floor'] = floor_val
             new_entry['level'] = level_val
-            sessions = load_sessions()
-            session = sessions.get(new_entry['session_id'])
+            
+            # Fetch only this session (no full-table load)
+            session = get_session_by_id(new_entry['session_id'])
             if not session:
                 log_rejection("VocaGuard session missing or invalid", new_entry)
+                _record_abuse('invalid_session', request.remote_addr, new_entry.get('session_id'))
                 return jsonify({"error": "VocaGuard session missing or invalid"}), 400
+            
             if datetime.fromisoformat(session['expires']) < datetime.utcnow():
                 log_rejection("VocaGuard session expired", new_entry)
-                sessions.pop(new_entry['session_id'], None)
-                save_sessions(sessions)
+                _record_abuse('session_expired', request.remote_addr, new_entry.get('session_id'))
+                delete_session(new_entry['session_id'])
                 return jsonify({"error": "VocaGuard session expired"}), 400
+            
             if session['floor'] != new_entry['floor'] or session['level'] != new_entry['level']:
                 log_rejection("VocaGuard progress mismatch", new_entry)
+                _record_abuse('validate_mismatch', request.remote_addr, new_entry.get('session_id'),
+                             {'session_floor': session['floor'], 'session_level': session['level'],
+                              'submitted_floor': new_entry['floor'], 'submitted_level': new_entry['level']})
                 return jsonify({"error": "VocaGuard progress mismatch"}), 400
-            sessions.pop(new_entry['session_id'], None)
-            save_sessions(sessions)
+            
+            # Expire session after successful leaderboard submission
+            delete_session(new_entry['session_id'])
             # Insert into SQLite and return sorted list
             entry_to_store = {k: v for k, v in new_entry.items() if k not in ('session_id', 'captcha_token', 'hcaptcha_token')}
             conn = get_db_connection()
@@ -839,16 +1185,24 @@ def pigeon_inventory():
     session_id = request.args.get('session_id')
     if not session_id:
         return jsonify({"error": "session_id required"}), 400
+    
     # Abuse flag check
     flagged, info = _is_flagged(request.remote_addr)
     if flagged:
+        _record_abuse('blocked_request', request.remote_addr, session_id)
         return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
-    sessions = load_sessions()
-    session = sessions.get(session_id)
+    
+    # Fetch only this session (no full-table load)
+    session = get_session_by_id(session_id)
     if not session:
+        _record_abuse('invalid_session', request.remote_addr, session_id)
         return jsonify({"error": "Invalid session"}), 400
+    
     if datetime.fromisoformat(session["expires"]) < datetime.utcnow():
+        _record_abuse('session_expired', request.remote_addr, session_id)
+        delete_session(session_id)
         return jsonify({"error": "Session expired"}), 400
+    
     session = _ensure_inventory(session)
     return jsonify({"carrierPigeon": session['inv']['carrierPigeon']}), 200
 
@@ -861,29 +1215,43 @@ def pigeon_purchase():
     session_id = data.get("session_id")
     if not session_id:
         return jsonify({"error": "session_id required"}), 400
+    
     flagged, info = _is_flagged(request.remote_addr)
     if flagged:
         _record_abuse('blocked_request', request.remote_addr, session_id)
         return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
-    sessions = load_sessions()
-    session = sessions.get(session_id)
+    
+    # Fetch only this session (no full-table load)
+    session = get_session_by_id(session_id)
     if not session:
+        _record_abuse('invalid_session', request.remote_addr, session_id)
         return jsonify({"error": "Invalid session"}), 400
+    
     if datetime.fromisoformat(session["expires"]) < datetime.utcnow():
+        _record_abuse('session_expired', request.remote_addr, session_id)
+        delete_session(session_id)
         return jsonify({"error": "Session expired"}), 400
+    
     session = _ensure_inventory(session)
     cur = session['inv']['carrierPigeon']
     if cur >= MAX_PIGEONS_PER_SESSION:
+        _record_abuse('pigeon_limit_reached', request.remote_addr, session_id)
         return jsonify({"error": "You've had enough pigeons for today!", "carrierPigeon": cur}), 400
-    session['inv']['carrierPigeon'] = cur + 1
-    # refresh expiry
-    session['expires'] = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
-    sessions[session_id] = session
-    save_sessions(sessions)
+    
+    new_count = cur + 1
+    new_expires = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
+    
+    # Update inventory and expiry via targeted query
+    # inv is passed as dict, update_session will json.dumps it
+    update_session(session_id, {
+        'expires': new_expires,
+        'inv': {**session['inv'], 'carrierPigeon': new_count}
+    })
+    
     return jsonify({
         "purchased": True,
-        "carrierPigeon": session['inv']['carrierPigeon'],
-        "remaining_capacity": MAX_PIGEONS_PER_SESSION - session['inv']['carrierPigeon']
+        "carrierPigeon": new_count,
+        "remaining_capacity": MAX_PIGEONS_PER_SESSION - new_count
     }), 200
 
 # Send a pigeon message
@@ -902,11 +1270,15 @@ def pigeon_send():
         _record_abuse('blocked_request', request.remote_addr, session_id)
         return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
 
-    sessions = load_sessions()
-    session = sessions.get(session_id)
+    # Fetch only this session (no full-table load)
+    session = get_session_by_id(session_id)
     if not session:
+        _record_abuse('invalid_session', request.remote_addr, session_id)
         return jsonify({"error": "Invalid session"}), 400
+    
     if datetime.fromisoformat(session["expires"]) < datetime.utcnow():
+        _record_abuse('session_expired', request.remote_addr, session_id)
+        delete_session(session_id)
         return jsonify({"error": "Session expired"}), 400
 
     session = _ensure_inventory(session)
@@ -919,46 +1291,67 @@ def pigeon_send():
         _record_abuse('sanitize_reject', request.remote_addr, session_id)
         return jsonify({"error": "Message rejected (empty/invalid after sanitation)"}), 400
 
-    pigeons = load_pigeons()
-    # Treat missing delivered flag as undelivered
-    session_messages = [p for p in pigeons if p.get('from_session') == session_id]
-    if len(session_messages) >= MAX_PIGEONS_PER_SESSION:
+    # Check message count for this session (targeted query, LIMIT)
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('SELECT COUNT(*) FROM pigeons WHERE from_session = ? AND delivered = 0', (session_id,))
+    message_count = cur.fetchone()[0]
+    conn.close()
+    
+    if message_count >= MAX_PIGEONS_PER_SESSION:
         _record_abuse('message_cap', request.remote_addr, session_id)
         return jsonify({"error": "Session pigeon message limit reached"}), 429
 
-    last_same_session = next((p for p in reversed(pigeons) if p.get('from_session') == session_id), None)
-    if last_same_session and last_same_session.get('text') == text:
+    # Check for duplicate (targeted query)
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        'SELECT id FROM pigeons WHERE from_session = ? AND text = ? ORDER BY created DESC LIMIT 1',
+        (session_id, text)
+    )
+    if cur.fetchone():
+        conn.close()
         _record_abuse('duplicate', request.remote_addr, session_id)
         return jsonify({"error": "Duplicate message"}), 400
+    conn.close()
 
-    session['inv']['carrierPigeon'] -= 1
-    sessions[session_id] = session
-    save_sessions(sessions)
-
-    pigeons.append({
-        "id": str(uuid.uuid4()),
-        "text": text,
-        "from_session": session_id,
-        "from_floor": int(session.get("floor", 0)),  # capture sender floor
-        "from_level": int(session.get("level", 0)),  # capture sender level
-        "from_verified": bool(session.get("verified", False)),  # capture sender verification
-        "created": datetime.utcnow().isoformat(),
-        "delivered": False,
-        "delivered_at": None,
-        "delivered_to": None
+    # Decrement pigeon inventory
+    new_pigeon_count = session['inv']['carrierPigeon'] - 1
+    update_session(session_id, {
+        'inv': {**session['inv'], 'carrierPigeon': new_pigeon_count}
     })
-    save_pigeons(pigeons)
 
-    pending = len(_pending_pigeons(pigeons))
+    # Insert pigeon message (targeted INSERT, not full rewrite)
+    pigeon_id = str(uuid.uuid4())
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        '''INSERT INTO pigeons (id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        (pigeon_id, text, session_id, int(session.get("floor", 0)), int(session.get("level", 0)), 
+         bool(session.get("verified", False)), datetime.utcnow().isoformat(), 0, None, None)
+    )
+    conn.commit()
+    conn.close()
+
+    # Count pending pigeons (targeted COUNT query)
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('SELECT COUNT(*) FROM pigeons WHERE delivered = 0')
+    pending = cur.fetchone()[0]
+    
+    cur.execute('SELECT COUNT(*) FROM pigeons')
+    total = cur.fetchone()[0]
+    conn.close()
 
     _record_abuse('message_sent', request.remote_addr, session_id)
 
     return jsonify({
         "stored": True,
         "queue_length_pending": pending,
-        "queue_length_total": len(pigeons),
+        "queue_length_total": total,
         "sanitized_text": text,
-        "carrierPigeon_remaining": session['inv']['carrierPigeon']
+        "carrierPigeon_remaining": new_pigeon_count
     }), 200
 
 # Deliver a pigeon message to session
@@ -969,35 +1362,50 @@ def pigeon_delivery():
     session_id = data.get('session_id')
     if not session_id:
         return jsonify({"error": "session_id required"}), 400
-    sessions = load_sessions()
-    session = sessions.get(session_id)
+    
+    # Fetch only this session (no full-table load)
+    session = get_session_by_id(session_id)
     if not session:
+        _record_abuse('invalid_session', request.remote_addr, session_id)
         return jsonify({"error": "Invalid session"}), 400
+    
     if datetime.fromisoformat(session["expires"]) < datetime.utcnow():
+        _record_abuse('session_expired', request.remote_addr, session_id)
+        delete_session(session_id)
         return jsonify({"error": "Session expired"}), 400
 
-    pigeons = load_pigeons()
-    # select a message using weighted, progress-based matching
-    session["session_id"] = session_id  # help selector avoid self
-    sel_idx, delivered_msg = _select_pigeon_for_delivery(pigeons, session, sessions)
-    if delivered_msg is not None and sel_idx is not None:
-        pigeons[sel_idx]['delivered'] = True
-        pigeons[sel_idx]['delivered_at'] = datetime.utcnow().isoformat()
-        pigeons[sel_idx]['delivered_to'] = session_id
-        save_pigeons(pigeons)
-        # store recipient's last sender to reduce repetition
-        session['last_message_received_at'] = datetime.utcnow().isoformat()
-        session['last_from_session_delivered'] = delivered_msg.get('from_session')
-        sessions[session_id] = session
-        save_sessions(sessions)
+    # Use optimized delivery function with targeted query
+    delivered_msg = get_pending_pigeon_for_delivery(
+        session.get('floor', 0),
+        session_id,
+        session.get('last_from_session_delivered')
+    )
+    
+    if delivered_msg:
+        # Mark single pigeon delivered (targeted UPDATE, not full rewrite)
+        mark_pigeon_delivered(delivered_msg['id'], session_id)
+        
+        # Update session metadata (targeted UPDATE, not full rewrite)
+        update_session(session_id, {
+            'last_message_received_at': datetime.utcnow().isoformat(),
+            'last_from_session_delivered': delivered_msg.get('from_session')
+        })
+    
+    # Count pending pigeons (targeted COUNT query)
+    pending = get_pending_pigeon_count(session_id)
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('SELECT COUNT(*) FROM pigeons')
+    total = cur.fetchone()[0]
+    conn.close()
 
-    remaining_pending = len(_pending_pigeons(pigeons))
     return jsonify({
         "delivered": bool(delivered_msg),
         "pigeon_message": delivered_msg["text"] if delivered_msg else None,
         "pigeon_id": delivered_msg["id"] if delivered_msg else None,
-        "remaining_queue_pending": remaining_pending,
-        "remaining_queue_total": len(pigeons)
+        "remaining_queue_pending": pending,
+        "remaining_queue_total": total
     }), 200
 
 # Get abuse status (whitelisted IPs only)
