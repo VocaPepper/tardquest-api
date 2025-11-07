@@ -92,6 +92,8 @@ Only requests from whitelisted IP addresses will be granted access to abuse metr
 
 ## Client Configuration
 
+> ![javascript-sad-programmer](https://github.com/user-attachments/assets/6050959b-1554-4917-b622-b2dc213b63a7)
+
 The TardQuest client (JavaScript) communicates with this API and requires the following configuration:
 
 ### TardBoard (Leaderboard + Anti-Cheat Integration)
