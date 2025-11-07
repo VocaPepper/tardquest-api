@@ -94,7 +94,7 @@ Only requests from whitelisted IP addresses will be granted access to abuse metr
 
 The TardQuest client (JavaScript) communicates with this API and requires the following configuration:
 
-### Enable TardBoard (Leaderboard + Anti-Cheat Integration)
+### TardBoard (Leaderboard + Anti-Cheat Integration)
 
 Edit `tardboard.js` client module:
 
@@ -106,7 +106,7 @@ const API_BASE = 'http://your-domain-or-ip:9601';
 const TURNSTILE_SITE_KEY = 'your-site-key';
 ```
 
-### Enable Carrier Pigeon (Messaging System)
+### Carrier Pigeon (Messaging System)
 
 Edit `pigeon.js` client module:
 
@@ -114,7 +114,10 @@ Edit `pigeon.js` client module:
 // API Configuration
 const API_BASE = 'http://your-domain-or-ip:9601';
 ```
-### Enable Carrier Pigeon Purchase on Merchant
+> [!WARNING]
+> This is currently dependent on `tardboard.js`!
+
+### Carrier Pigeon Purchase on Merchant
 
 Edit `game.html` and under `const merchant` look for the following:
 
