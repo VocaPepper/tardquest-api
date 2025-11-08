@@ -131,6 +131,18 @@ fetch('http://your-domain-or-ip:9601/api/pigeon/purchase', {
 })
 ```
 
+### API Test Suite Client Configuration
+
+Edit `APITest.html`:
+
+```javascript
+// API Configuration
+const API_BASE = 'http://your-domain-or-ip:9601';
+
+// Cloudflare Turnstile Captcha
+const TURNSTILE_SITE_KEY = 'your-site-key';
+```
+
 Key settings in `TardQuest_API.py`:
 
 - **Session Timeout**: 120 minutes (resets on update)
