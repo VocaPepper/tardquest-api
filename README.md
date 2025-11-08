@@ -92,11 +92,13 @@ Only requests from whitelisted IP addresses will be granted access to abuse metr
 
 ## Client Configuration
 
-The TardQuest client (JavaScript) communicates with this API and requires the following configuration:
+> ![javascript-sad-programmer](https://github.com/user-attachments/assets/6050959b-1554-4917-b622-b2dc213b63a7)
+
+The [TardQuest client](https://github.com/packardbell95/tardquest) (JavaScript) communicates with this API and requires the following configuration:
 
 ### TardBoard (Leaderboard + Anti-Cheat Integration)
 
-The `tardboard.js` client module manages leaderboard submissions with anti-cheat validation:
+Edit `tardboard.js` client module:
 
 ```javascript
 // API Configuration
@@ -108,14 +110,18 @@ const TURNSTILE_SITE_KEY = 'your-site-key';
 
 ### Carrier Pigeon (Messaging System)
 
-The `pigeon.js` client module implements the messaging system:
+Edit `pigeon.js` client module:
 
 ```javascript
 // API Configuration
 const API_BASE = 'http://your-domain-or-ip:9601';
 ```
+> [!WARNING]
+> This is currently dependent on `tardboard.js`!
 
-And in `game.html`, under `const merchant`:
+### Carrier Pigeon Purchase on Merchant
+
+Edit `game.html` and under `const merchant` look for the following:
 
 ```javascript
 fetch('http://your-domain-or-ip:9601/api/pigeon/purchase', {
