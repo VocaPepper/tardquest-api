@@ -171,14 +171,16 @@ Server: Post to leaderboard if all checks pass
 
 The validator enforces these rules during `/api/update` calls:
 
-| Rule                 | Description                                          |
-| -------------------- | ---------------------------------------------------- |
-| **Floor Regression** | Floor cannot decrease from current value             |
-| **Level Regression** | Level cannot decrease on the same floor              |
-| **Floor Skips**      | Can only advance 1 floor at a time (no jumping)      |
-| **Level Jumps**      | Can only advance 1 level at a time on same floor     |
-| **Level Speed Hack** | Minimum 10 seconds required between level increments |
+| Rule | Description |
+|------|-------------|
+| **Floor Regression** | Floor cannot decrease from current value |
+| **Level Regression** | Level cannot decrease on the same floor |
+| **EXP Regression** | EXP cannot decrease from current value |
+| **Floor Skips** | Can only advance 1 floor at a time (no jumping) |
+| **Level Jumps** | Can only advance 1 level at a time on same floor |
+| **EXP Validation** | Each level costs more EXP. Level N requires `(N-1)*N/2 * 10` total EXP (Level 1→2=10, Level 2→3=20, Level 3→4=30...) |
 | **Floor Speed Hack** | Minimum 10 seconds required between floor increments |
+| **Level-Up Spam** | Maximum 4 level-ups per 60 seconds (prevents `/giveexp` abuse) |
 
 Violations are logged to `vocaguard.json` with detailed metadata for analysis.
 
@@ -298,9 +300,11 @@ Validate a player's progress update during gameplay:
 is_valid, error_message, abuse_details = validator.validate_progress_update(
     current_floor=1,
     current_level=5,
+    current_exp=150,
     new_floor=1,
     new_level=6,
-    last_level_update='2025-11-08T12:00:00.000000',
+    new_exp=210,
+    session_id='e8267255-85a8-4175-bd39-5823f6a3faca',
     last_floor_update='2025-11-08T11:00:00.000000'
 )
 
@@ -308,9 +312,9 @@ if not is_valid:
     print(f"Validation failed: {error_message}")
     print(f"Details: {abuse_details}")
     # Returns: {
-    #   "cheat_type": "level_speed_hack",
-    #   "time_since_last_seconds": 5.2,
-    #   "min_required_seconds": 10
+    #   "cheat_type": "levelup_spam",
+    #   "levelups_in_last_60s": 5,
+    #   "max_allowed": 5
     # }
 ```
 

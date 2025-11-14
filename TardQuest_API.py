@@ -140,8 +140,12 @@ def init_db():
             cur.execute("ALTER TABLE sessions ADD COLUMN created_via TEXT DEFAULT 'api_start'")
             conn.commit()
             print("✓ Database Migration: Added created_via column to sessions table")
+        if 'exp' not in columns:
+            cur.execute("ALTER TABLE sessions ADD COLUMN exp INTEGER DEFAULT 0")
+            conn.commit()
+            print("✓ Database Migration: Added exp column to sessions table")
     except Exception as e:
-        log_error('Database Migration', e, {'operation': 'add_created_via_column'})
+        log_error('Database Migration', e, {'operation': 'add_columns'})
     
     conn.commit()
     conn.close()
@@ -891,10 +895,10 @@ def tardquest_start():
         "session_id": session_id,
         "floor": 1,
         "level": 1,
+        "exp": 0,
         "expires": expires,
         "created": datetime.utcnow().isoformat(),
         "inv": {"carrierPigeon": 0},
-        "last_level_update": None,
         "last_floor_update": None,
         "last_message_received_at": None,
         "last_from_session_delivered": None,
@@ -928,10 +932,11 @@ def vocaguard_update():
     try:
         floor = int(data.get('floor', 0))
         level = int(data.get('level', 0))
+        exp = int(data.get('exp', 0))
     except (ValueError, TypeError):
         _record_abuse('invalid_progress_type', request.remote_addr, session_id,
-                     {'floor_val': data.get('floor'), 'level_val': data.get('level')})
-        return jsonify({"error": "Floor and level must be valid integers"}), 400
+                     {'floor_val': data.get('floor'), 'level_val': data.get('level'), 'exp_val': data.get('exp')})
+        return jsonify({"error": "Floor, level, and exp must be valid integers"}), 400
     
     # Fetch only this session (no full-table load)
     session = get_session_by_id(session_id)
@@ -948,7 +953,7 @@ def vocaguard_update():
     
     current_floor = session['floor']
     current_level = session['level']
-    last_level_update = session.get('last_level_update')
+    current_exp = session.get('exp', 0)
     last_floor_update = session.get('last_floor_update')
     
     # Run anti-cheat validation if enabled
@@ -956,9 +961,11 @@ def vocaguard_update():
         is_valid, error_message, abuse_details = vocaguard_validator.validate_progress_update(
             current_floor=current_floor,
             current_level=current_level,
+            current_exp=current_exp,
             new_floor=floor,
             new_level=level,
-            last_level_update=last_level_update,
+            new_exp=exp,
+            session_id=session_id,
             last_floor_update=last_floor_update
         )
         
@@ -972,9 +979,8 @@ def vocaguard_update():
                 "detail": f"Current floor: {current_floor}, attempted: {floor}" if "floor" in error_message.lower() else f"Current level: {current_level}, attempted: {level}"
             }), 400
     
-    # Update progress with new timestamps for increments
+    # Update progress with new timestamps for floor increments
     now = datetime.utcnow().isoformat()
-    new_last_level_update = now if level > current_level else last_level_update
     new_last_floor_update = now if floor > current_floor else last_floor_update
     
     # Update session progress only if valid (targeted UPDATE, not full rewrite)
@@ -982,8 +988,8 @@ def vocaguard_update():
     update_session(session_id, {
         'floor': floor,
         'level': level,
+        'exp': exp,
         'expires': new_expires,
-        'last_level_update': new_last_level_update,
         'last_floor_update': new_last_floor_update
     })
 
@@ -1001,10 +1007,10 @@ def vocaguard_start():
         "session_id": session_id,
         "floor": 1,
         "level": 1,
+        "exp": 0,
         "expires": expires,
         "created": datetime.utcnow().isoformat(),
         "inv": {"carrierPigeon": 0},
-        "last_level_update": None,
         "last_floor_update": None,
         "last_message_received_at": None,
         "last_from_session_delivered": None,
@@ -1029,10 +1035,11 @@ def vocaguard_update_legacy():
     try:
         floor = int(data.get('floor', 0))
         level = int(data.get('level', 0))
+        exp = int(data.get('exp', 0))
     except (ValueError, TypeError):
         _record_abuse('invalid_progress_type', request.remote_addr, session_id,
-                     {'floor_val': data.get('floor'), 'level_val': data.get('level')})
-        return jsonify({"error": "Floor and level must be valid integers"}), 400
+                     {'floor_val': data.get('floor'), 'level_val': data.get('level'), 'exp_val': data.get('exp')})
+        return jsonify({"error": "Floor, level, and exp must be valid integers"}), 400
     
     # Fetch only this session (no full-table load)
     session = get_session_by_id(session_id)
@@ -1049,7 +1056,7 @@ def vocaguard_update_legacy():
     
     current_floor = session['floor']
     current_level = session['level']
-    last_level_update = session.get('last_level_update')
+    current_exp = session.get('exp', 0)
     last_floor_update = session.get('last_floor_update')
     
     # Run anti-cheat validation if enabled
@@ -1057,9 +1064,11 @@ def vocaguard_update_legacy():
         is_valid, error_message, abuse_details = vocaguard_validator.validate_progress_update(
             current_floor=current_floor,
             current_level=current_level,
+            current_exp=current_exp,
             new_floor=floor,
             new_level=level,
-            last_level_update=last_level_update,
+            new_exp=exp,
+            session_id=session_id,
             last_floor_update=last_floor_update
         )
         
@@ -1073,9 +1082,8 @@ def vocaguard_update_legacy():
                 "detail": f"Current floor: {current_floor}, attempted: {floor}" if "floor" in error_message.lower() else f"Current level: {current_level}, attempted: {level}"
             }), 400
     
-    # Update progress with new timestamps for increments
+    # Update progress with new timestamps for floor increments
     now = datetime.utcnow().isoformat()
-    new_last_level_update = now if level > current_level else last_level_update
     new_last_floor_update = now if floor > current_floor else last_floor_update
     
     # Update session progress only if valid (targeted UPDATE, not full rewrite)
@@ -1083,8 +1091,8 @@ def vocaguard_update_legacy():
     update_session(session_id, {
         'floor': floor,
         'level': level,
+        'exp': exp,
         'expires': new_expires,
-        'last_level_update': new_last_level_update,
         'last_floor_update': new_last_floor_update
     })
 

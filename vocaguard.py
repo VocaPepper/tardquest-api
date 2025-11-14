@@ -17,28 +17,34 @@ class VocaGuardValidator:
     - Level regression (level going backwards on same floor)
     - Floor skips (jumping more than 1 floor)
     - Level jumps (jumping more than 1 level on same floor)
-    - Speed hacks (progressing too fast between updates)
+    - EXP validation (ensuring EXP matches level progression)
+    - Level-up frequency abuse (max 10 level-ups per 60 seconds)
     """
     
-    # Minimum seconds between level increments (prevents speed hacking)
-    MIN_LEVEL_INCREMENT_SECONDS = 10
     # Minimum seconds between floor increments (prevents speed hacking)
     MIN_FLOOR_INCREMENT_SECONDS = 10
     # Proof-of-work challenge expiration in seconds
     POW_CHALLENGE_EXPIRY_SECONDS = 24 * 60 * 60  # 24 hours
+    # Level-up frequency limits
+    MAX_LEVELUPS_PER_MINUTE = 4
+    LEVELUP_FREQUENCY_WINDOW_SECONDS = 60
     
     def __init__(self):
         """Initialize the validator."""
         # Store active challenges: {challenge_id: {session_id, secret, created_at}}
         self._active_challenges: Dict[str, Dict] = {}
+        # Track level-up history per session: {session_id: [timestamps]}
+        self._levelup_history: Dict[str, list] = {}
     
     def validate_progress_update(
         self,
         current_floor: int,
         current_level: int,
+        current_exp: int,
         new_floor: int,
         new_level: int,
-        last_level_update: Optional[str] = None,
+        new_exp: int,
+        session_id: str,
         last_floor_update: Optional[str] = None
     ) -> Tuple[bool, Optional[str], Optional[Dict]]:
         """
@@ -47,9 +53,11 @@ class VocaGuardValidator:
         Args:
             current_floor: Current floor from database
             current_level: Current level from database
+            current_exp: Current EXP from database
             new_floor: Attempted new floor
             new_level: Attempted new level
-            last_level_update: ISO format timestamp of last level increment
+            new_exp: Attempted new EXP
+            session_id: Session identifier for tracking level-up frequency
             last_floor_update: ISO format timestamp of last floor increment
         
         Returns:
@@ -75,7 +83,15 @@ class VocaGuardValidator:
                 "attempted_level": new_level
             }
         
-        # Check 3: Floor skip (can only advance 1 floor at a time)
+        # Check 3: EXP regression
+        if new_exp < current_exp:
+            return False, "EXP regression detected", {
+                "cheat_type": "exp_regression",
+                "current_exp": current_exp,
+                "attempted_exp": new_exp
+            }
+        
+        # Check 4: Floor skip (can only advance 1 floor at a time)
         if new_floor > current_floor and new_floor - current_floor > 1:
             return False, "Abnormal floor jump detected", {
                 "cheat_type": "floor_skip",
@@ -84,7 +100,7 @@ class VocaGuardValidator:
                 "skip_distance": new_floor - current_floor
             }
         
-        # Check 4: Level jump (can only advance 1 level at a time on same floor)
+        # Check 5: Level jump (can only advance 1 level at a time on same floor)
         if new_level > current_level and new_level - current_level > 1 and new_floor == current_floor:
             return False, "Abnormal level jump detected", {
                 "cheat_type": "level_jump",
@@ -93,23 +109,21 @@ class VocaGuardValidator:
                 "jump_distance": new_level - current_level
             }
         
-        # Check 5: Level speed hack
-        if new_level > current_level:
-            if last_level_update:
-                try:
-                    last_update_dt = datetime.fromisoformat(last_level_update)
-                    time_since_last = (datetime.utcnow() - last_update_dt).total_seconds()
-                    if time_since_last < self.MIN_LEVEL_INCREMENT_SECONDS:
-                        return False, "Level increment too fast!", {
-                            "cheat_type": "level_speed_hack",
-                            "time_since_last_seconds": time_since_last,
-                            "min_required_seconds": self.MIN_LEVEL_INCREMENT_SECONDS
-                        }
-                except (ValueError, TypeError):
-                    # Invalid timestamp format, treat as valid (don't block)
-                    pass
+        # Check 6: EXP validation for level progression
+        # Each level costs incrementally more: Level 1>2 costs 10, Level 2>3 costs 20, etc.
+        # Total EXP for level N = 10 + 20 + 30 + ... + (N-1)*10 = (N-1)*N/2 * 10
+        required_exp_for_level = (new_level - 1) * new_level // 2 * 10
         
-        # Check 6: Floor speed hack
+        # New EXP must be at least the required amount for the new level
+        if new_exp < required_exp_for_level:
+            return False, "Insufficient EXP for level", {
+                "cheat_type": "exp_insufficient",
+                "new_level": new_level,
+                "required_exp": required_exp_for_level,
+                "attempted_exp": new_exp
+            }
+        
+        # Check 7: Floor speed hack (can't advance floor too quickly)
         if new_floor > current_floor:
             if last_floor_update:
                 try:
@@ -124,6 +138,33 @@ class VocaGuardValidator:
                 except (ValueError, TypeError):
                     # Invalid timestamp format, treat as valid (don't block)
                     pass
+        
+        # Check 8: Level-up frequency abuse (max 10 level-ups per 60 seconds)
+        if new_level > current_level:
+            # Initialize session history if needed
+            if session_id not in self._levelup_history:
+                self._levelup_history[session_id] = []
+            
+            # Get current time
+            now = datetime.utcnow()
+            history = self._levelup_history[session_id]
+            
+            # Remove old entries outside the time window
+            cutoff_time = now - timedelta(seconds=self.LEVELUP_FREQUENCY_WINDOW_SECONDS)
+            self._levelup_history[session_id] = [
+                ts for ts in history if datetime.fromisoformat(ts) > cutoff_time
+            ]
+            
+            # Check if we've hit the limit
+            if len(self._levelup_history[session_id]) >= self.MAX_LEVELUPS_PER_MINUTE:
+                return False, "Level-up frequency limit exceeded", {
+                    "cheat_type": "levelup_spam",
+                    "levelups_in_last_60s": len(self._levelup_history[session_id]),
+                    "max_allowed": self.MAX_LEVELUPS_PER_MINUTE
+                }
+            
+            # Record this level-up
+            self._levelup_history[session_id].append(now.isoformat())
         
         # All checks passed
         return True, None, None
