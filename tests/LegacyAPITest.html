@@ -464,9 +464,9 @@
     </div>
 
     <script>
-        const API_BASE = 'http://your-domain-or-ip:9601'; // Change this to your API base URL
+        const API_BASE = 'http://localhost:5500'; // Change to your API base URL
         const LS_SESSION_KEY = 'vocaguardSessionId';
-        const TURNSTILE_SITE_KEY = 'your-site-key'; // Replace with your actual Turnstile site key for leaderboard tests
+        const TURNSTILE_SITE_KEY = 'your-turnstile-site-key-here'; // Replace with your actual site key
         let isTestSuiteRunning = false;
         let _turnstileReadyPromise = null;
         let turnstileCaptchaToken = null;

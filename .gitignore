@@ -1,0 +1,16 @@
+# Database files
+tardquest.db
+
+#Environment files
+.env
+
+# Log files
+flagged.json
+log.json
+vocaguard.json
+
+# SSL certificates and keys
+ssl/
+
+# Python cache files
+__pycache__/

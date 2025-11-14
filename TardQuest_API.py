@@ -19,6 +19,9 @@ import time
 import traceback
 from threading import Lock
 
+# Import VocaGuard anti-cheat module
+from vocaguard import validator as vocaguard_validator, VocaGuardValidator
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -39,6 +42,11 @@ whitelist_lock = Lock()
 session_ops_lock = Lock()
 
 # --- Application Configuration Constants ---
+# Major.Minor.Patch
+API_VERSION = "3.0.251110"
+# Server-Client check looks at Major.Minor only for compatibility, patch is numbered by date last edited in YYMMDD format.
+# Legacy endpoints ignore this check, as they are deprecated and will be removed in future versions.
+
 # Database connection timeout in seconds
 DB_CONNECTION_TIMEOUT_SECONDS = 30
 # API rate limiting: default maximum requests
@@ -46,11 +54,15 @@ API_DEFAULT_RATE_LIMIT = "100 per hour"
 # External API timeout in seconds (for Turnstile, etc)
 EXTERNAL_API_TIMEOUT_SECONDS = 5
 # Session age before auto-purge in days
-SESSION_PURGE_AGE_DAYS = 30
+SESSION_PURGE_AGE_DAYS = 7
 # Background worker sleep interval in seconds
 BACKGROUND_WORKER_SLEEP_SECONDS = 24 * 60 * 60  # 24 hours
 # Maximum leaderboard name length
 MAX_LEADERBOARD_NAME_LENGTH = 5
+
+# --- Anti-Cheat Configuration ---
+# Enable/disable VocaGuard anti-cheat validation on progress updates
+ENABLE_VOCAGUARD = os.getenv('ENABLE_VOCAGUARD', 'true').lower() in ('true', '1', 'yes')
 
 # --- SQLite setup ---
 # Single DB file for all data
@@ -97,7 +109,8 @@ def init_db():
             last_floor_update TEXT,
             last_message_received_at TEXT,
             last_from_session_delivered TEXT,
-            verified INTEGER DEFAULT 0
+            verified INTEGER DEFAULT 0,
+            created_via TEXT DEFAULT 'api_start'
         )
         """
     )
@@ -118,6 +131,18 @@ def init_db():
         )
         """
     )
+    
+    # Migration: Add created_via column if it doesn't exist
+    try:
+        cur.execute("PRAGMA table_info(sessions)")
+        columns = [col[1] for col in cur.fetchall()]
+        if 'created_via' not in columns:
+            cur.execute("ALTER TABLE sessions ADD COLUMN created_via TEXT DEFAULT 'api_start'")
+            conn.commit()
+            print("✓ Database Migration: Added created_via column to sessions table")
+    except Exception as e:
+        log_error('Database Migration', e, {'operation': 'add_created_via_column'})
+    
     conn.commit()
     conn.close()
 
@@ -138,22 +163,45 @@ def save_session(session_id: str, session: Dict[str, any]) -> None:
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute(
-            'INSERT OR REPLACE INTO sessions (session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (
-                session_id,
-                int(session.get('floor', 1)),
-                int(session.get('level', 1)),
-                session.get('expires', ''),
-                session.get('created', ''),
-                json.dumps(session.get('inv', {})),
-                session.get('last_level_update'),
-                session.get('last_floor_update'),
-                session.get('last_message_received_at'),
-                session.get('last_from_session_delivered'),
-                1 if session.get('verified') else 0,
+        
+        # Try to insert with created_via column
+        try:
+            cur.execute(
+                'INSERT OR REPLACE INTO sessions (session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified, created_via) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (
+                    session_id,
+                    int(session.get('floor', 1)),
+                    int(session.get('level', 1)),
+                    session.get('expires', ''),
+                    session.get('created', ''),
+                    json.dumps(session.get('inv', {})),
+                    session.get('last_level_update'),
+                    session.get('last_floor_update'),
+                    session.get('last_message_received_at'),
+                    session.get('last_from_session_delivered'),
+                    1 if session.get('verified') else 0,
+                    session.get('created_via', 'api_start'),
+                )
             )
-        )
+        except Exception:
+            # Fallback: column might not exist yet, insert without it
+            cur.execute(
+                'INSERT OR REPLACE INTO sessions (session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (
+                    session_id,
+                    int(session.get('floor', 1)),
+                    int(session.get('level', 1)),
+                    session.get('expires', ''),
+                    session.get('created', ''),
+                    json.dumps(session.get('inv', {})),
+                    session.get('last_level_update'),
+                    session.get('last_floor_update'),
+                    session.get('last_message_received_at'),
+                    session.get('last_from_session_delivered'),
+                    1 if session.get('verified') else 0,
+                )
+            )
+        
         conn.commit()
         conn.close()
     except Exception as e:
@@ -207,8 +255,17 @@ def get_session_by_id(session_id: str) -> Optional[Dict]:
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute('SELECT session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified FROM sessions WHERE session_id = ?', (session_id,))
-        row = cur.fetchone()
+        # Try to fetch with created_via column first
+        try:
+            cur.execute('SELECT session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified, created_via FROM sessions WHERE session_id = ?', (session_id,))
+            row = cur.fetchone()
+        except Exception:
+            # Fallback: column might not exist, fetch without it
+            cur.execute('SELECT session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified FROM sessions WHERE session_id = ?', (session_id,))
+            row = cur.fetchone()
+            if row:
+                row = tuple(list(row) + ['api_start'])  # Add default created_via
+        
         conn.close()
         
         if not row:
@@ -225,7 +282,8 @@ def get_session_by_id(session_id: str) -> Optional[Dict]:
             'last_floor_update': row[7],
             'last_message_received_at': row[8],
             'last_from_session_delivered': row[9],
-            'verified': bool(row[10])
+            'verified': bool(row[10]),
+            'created_via': row[11] if len(row) > 11 else 'api_start'
         }
     except Exception as e:
         log_error('get_session_by_id', e, {'session_id': session_id})
@@ -780,10 +838,51 @@ limiter = Limiter(
 
 # API Endpoints
 
-# Start a new anti-cheat session
-@app.route('/api/vocaguard/start', methods=['POST'])
-def vocaguard_start():
-    # Starts a new anti-cheat session and returns session_id
+# Start a new session - new endpoint separate from vocaguard/start
+@app.route('/api/start', methods=['POST'])
+def tardquest_start():
+    # Starts a new session and returns session_id
+    # First check: validate client API version before assigning session
+    data = request.get_json() or {}
+    client_version = data.get('version')
+    
+    if not client_version:
+        return jsonify({
+            "error": "Client API version required",
+            "server_version": API_VERSION,
+            "reason": "Missing 'version' field in request"
+        }), 400
+    
+    # Check version compatibility (compare major.minor, ignore patch/date)
+    def parse_version(version_str: str) -> tuple:
+        """Parse version string into (major, minor) tuple"""
+        try:
+            parts = version_str.split('.')
+            return (int(parts[0]), int(parts[1]))
+        except (IndexError, ValueError):
+            return None
+    
+    client_version_tuple = parse_version(client_version)
+    server_version_tuple = parse_version(API_VERSION)
+    
+    if not client_version_tuple or not server_version_tuple:
+        return jsonify({
+            "error": "Invalid version format",
+            "server_version": API_VERSION,
+            "client_version": client_version,
+            "reason": "Version must be in format: major.minor.patch"
+        }), 400
+    
+    # Reject if major.minor doesn't match
+    if client_version_tuple != server_version_tuple:
+        return jsonify({
+            "error": "API version mismatch",
+            "server_version": API_VERSION,
+            "client_version": client_version,
+            "reason": f"Expected {server_version_tuple[0]}.{server_version_tuple[1]} or newer"
+        }), 409  # 409 Conflict for version mismatch
+    
+    # Version check passed, proceed with session creation
     session_id = str(uuid.uuid4())
     expires = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
     
@@ -799,19 +898,29 @@ def vocaguard_start():
         "last_floor_update": None,
         "last_message_received_at": None,
         "last_from_session_delivered": None,
-        "verified": False
+        "verified": False,
+        "created_via": "api_start"
     }
     save_session(session_id, new_session)
 
-    return jsonify({
+    response_data = {
         "session_id": session_id,
-    }), 200
+        "server_version": API_VERSION
+    }
 
-# Update session progress with anti-cheat checks
-@app.route('/api/vocaguard/update', methods=['POST'])
+    # Generate proof-of-work challenge if VocaGuard is enabled
+    if ENABLE_VOCAGUARD:
+        challenge_id, challenge_secret = vocaguard_validator.generate_challenge(session_id)
+        response_data["challenge_id"] = challenge_id
+        response_data["challenge_secret"] = challenge_secret
+
+    return jsonify(response_data), 200
+
+# Update session progress
+@app.route('/api/update', methods=['POST'])
 @limiter.limit("10 per minute")  # 10 updates per minute per IP
 def vocaguard_update():
-    # Updates session progress with anti-cheat validation
+    # Updates session progress with optional anti-cheat validation
     data = request.get_json() or {}
     session_id = data.get('session_id')
     
@@ -839,72 +948,149 @@ def vocaguard_update():
     
     current_floor = session['floor']
     current_level = session['level']
-    
-    # Floor cannot decrease
-    if floor < current_floor:
-        _record_abuse('floor_regression', request.remote_addr, session_id, 
-                     {'current': current_floor, 'attempted': floor})
-        return jsonify({"error": "Floor regression detected", "detail": f"Current floor: {current_floor}, attempted: {floor}"}), 400
-    
-    # Level cannot decrease on same floor
-    if floor == current_floor and level < current_level:
-        _record_abuse('level_regression', request.remote_addr, session_id,
-                     {'current': current_level, 'attempted': level})
-        return jsonify({"error": "Level regression detected on same floor", "detail": f"Current level: {current_level}, attempted: {level}"}), 400
-    
-    # Prevent skipping floors
-    if floor > current_floor and floor - current_floor > 1:
-        _record_abuse('floor_skip', request.remote_addr, session_id,
-                     {'current': current_floor, 'attempted': floor, 'skip_distance': floor - current_floor})
-        return jsonify({"error": "Abnormal floor jump detected", "detail": f"Current floor: {current_floor}, attempted: {floor}"}), 400
-    
-    # Prevent abnormal level jumps (must increment by 1 or stay the same)
-    if level > current_level and level - current_level > 1 and floor == current_floor:
-        _record_abuse('level_jump', request.remote_addr, session_id,
-                     {'current': current_level, 'attempted': level, 'jump_distance': level - current_level})
-        return jsonify({"error": "Abnormal level jump detected", "detail": f"Current level: {current_level}, attempted: {level}"}), 400
-    
-    now = datetime.utcnow()
     last_level_update = session.get('last_level_update')
     last_floor_update = session.get('last_floor_update')
-
-    # Enforce minimum 10 seconds between level increments
-    if level > current_level:
-        if last_level_update:
-            last_level_update_dt = datetime.fromisoformat(last_level_update)
-            if (now - last_level_update_dt).total_seconds() < 10:
-                _record_abuse('level_speed_hack', request.remote_addr, session_id,
-                             {'time_since_last': (now - last_level_update_dt).total_seconds()})
-                return jsonify({"error": "Level increment too fast!"}), 400
-        last_level_update = now.isoformat()
-    else:
-        last_level_update = session.get('last_level_update')
-
-    # Enforce minimum 10 seconds between floor increments
-    if floor > current_floor:
-        if last_floor_update:
-            last_floor_update_dt = datetime.fromisoformat(last_floor_update)
-            if (now - last_floor_update_dt).total_seconds() < 10:
-                _record_abuse('floor_speed_hack', request.remote_addr, session_id,
-                             {'time_since_last': (now - last_floor_update_dt).total_seconds()})
-                return jsonify({"error": "Floor increment too fast!"}), 400
-        last_floor_update = now.isoformat()
-    else:
-        last_floor_update = session.get('last_floor_update')
-
+    
+    # Run anti-cheat validation if enabled
+    if ENABLE_VOCAGUARD:
+        is_valid, error_message, abuse_details = vocaguard_validator.validate_progress_update(
+            current_floor=current_floor,
+            current_level=current_level,
+            new_floor=floor,
+            new_level=level,
+            last_level_update=last_level_update,
+            last_floor_update=last_floor_update
+        )
+        
+        if not is_valid:
+            # Record abuse and return error
+            abuse_details = abuse_details or {}
+            _record_abuse(abuse_details.get('cheat_type', 'unknown_cheat'), 
+                         request.remote_addr, session_id, abuse_details)
+            return jsonify({
+                "error": error_message,
+                "detail": f"Current floor: {current_floor}, attempted: {floor}" if "floor" in error_message.lower() else f"Current level: {current_level}, attempted: {level}"
+            }), 400
+    
+    # Update progress with new timestamps for increments
+    now = datetime.utcnow().isoformat()
+    new_last_level_update = now if level > current_level else last_level_update
+    new_last_floor_update = now if floor > current_floor else last_floor_update
+    
     # Update session progress only if valid (targeted UPDATE, not full rewrite)
     new_expires = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
     update_session(session_id, {
         'floor': floor,
         'level': level,
         'expires': new_expires,
-        'last_level_update': last_level_update,
-        'last_floor_update': last_floor_update
+        'last_level_update': new_last_level_update,
+        'last_floor_update': new_last_floor_update
     })
 
     return jsonify({"status": "updated"}), 200
 
-# Validate final submission before leaderboard post
+# Legacy VocaGuard start session endpoint - deprecated and will be removed after transition
+@app.route('/api/vocaguard/start', methods=['POST'])
+def vocaguard_start():
+    # Starts a new anti-cheat session and returns session_id
+    session_id = str(uuid.uuid4())
+    expires = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
+    
+    # Use save_session (atomic) instead of load_sessions/save_sessions pattern
+    new_session = {
+        "session_id": session_id,
+        "floor": 1,
+        "level": 1,
+        "expires": expires,
+        "created": datetime.utcnow().isoformat(),
+        "inv": {"carrierPigeon": 0},
+        "last_level_update": None,
+        "last_floor_update": None,
+        "last_message_received_at": None,
+        "last_from_session_delivered": None,
+        "verified": False,
+        "created_via": "vocaguard_legacy"
+    }
+    save_session(session_id, new_session)
+
+    return jsonify({
+        "session_id": session_id,
+    }), 200
+
+# Update session progress with anti-cheat checks - deprecated and will be removed after transition
+@app.route('/api/vocaguard/update', methods=['POST'])
+@limiter.limit("10 per minute")  # 10 updates per minute per IP
+def vocaguard_update_legacy():
+    # Updates session progress with optional anti-cheat validation
+    data = request.get_json() or {}
+    session_id = data.get('session_id')
+    
+    # VALIDATE TYPES EARLY to prevent TypeError (type safety fix)
+    try:
+        floor = int(data.get('floor', 0))
+        level = int(data.get('level', 0))
+    except (ValueError, TypeError):
+        _record_abuse('invalid_progress_type', request.remote_addr, session_id,
+                     {'floor_val': data.get('floor'), 'level_val': data.get('level')})
+        return jsonify({"error": "Floor and level must be valid integers"}), 400
+    
+    # Fetch only this session (no full-table load)
+    session = get_session_by_id(session_id)
+    if not session:
+        _record_abuse('invalid_session', request.remote_addr, session_id, 
+                     {'attempted_session': session_id})
+        return jsonify({"error": "Invalid session token"}), 400
+    
+    # Check expiration
+    if datetime.fromisoformat(session['expires']) < datetime.utcnow():
+        _record_abuse('session_expired', request.remote_addr, session_id)
+        delete_session(session_id)
+        return jsonify({"error": "Session expired"}), 400
+    
+    current_floor = session['floor']
+    current_level = session['level']
+    last_level_update = session.get('last_level_update')
+    last_floor_update = session.get('last_floor_update')
+    
+    # Run anti-cheat validation if enabled
+    if ENABLE_VOCAGUARD:
+        is_valid, error_message, abuse_details = vocaguard_validator.validate_progress_update(
+            current_floor=current_floor,
+            current_level=current_level,
+            new_floor=floor,
+            new_level=level,
+            last_level_update=last_level_update,
+            last_floor_update=last_floor_update
+        )
+        
+        if not is_valid:
+            # Record abuse and return error
+            abuse_details = abuse_details or {}
+            _record_abuse(abuse_details.get('cheat_type', 'unknown_cheat'), 
+                         request.remote_addr, session_id, abuse_details)
+            return jsonify({
+                "error": error_message,
+                "detail": f"Current floor: {current_floor}, attempted: {floor}" if "floor" in error_message.lower() else f"Current level: {current_level}, attempted: {level}"
+            }), 400
+    
+    # Update progress with new timestamps for increments
+    now = datetime.utcnow().isoformat()
+    new_last_level_update = now if level > current_level else last_level_update
+    new_last_floor_update = now if floor > current_floor else last_floor_update
+    
+    # Update session progress only if valid (targeted UPDATE, not full rewrite)
+    new_expires = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
+    update_session(session_id, {
+        'floor': floor,
+        'level': level,
+        'expires': new_expires,
+        'last_level_update': new_last_level_update,
+        'last_floor_update': new_last_floor_update
+    })
+
+    return jsonify({"status": "updated"}), 200
+
+# Validate final submission before leaderboard post - deprecated and will be removed after transition; handled in /api/leaderboard now
 @app.route('/api/vocaguard/validate', methods=['POST'])
 def vocaguard_validate():
     # Validates final submission before leaderboard post
@@ -942,11 +1128,17 @@ def vocaguard_validate():
                       'submitted_floor': floor, 'submitted_level': level})
         return jsonify({"result": "fail", "reason": "Mismatch with tracked progress"}), 400
 
-# Get API status
+# Get API status - deprecated duplicate; will be removed after transition
 @app.route('/api/leaderboard/status', methods=['GET'])
 def leaderboard_status():
     # Returns API status
     return jsonify({"status": "ok"}), 200
+
+# Get API status
+@app.route('/api/status', methods=['GET'])
+def api_status():
+    # Returns API status
+    return jsonify({"status": "ok", "version": API_VERSION}), 200
 
 # Handle leaderboard GET and POST requests
 @app.route('/api/leaderboard', methods=['GET', 'POST'])
@@ -1017,30 +1209,64 @@ def leaderboard():
             new_entry['floor'] = floor_val
             new_entry['level'] = level_val
             
-            # Fetch only this session (no full-table load)
-            session = get_session_by_id(new_entry['session_id'])
-            if not session:
-                log_rejection("VocaGuard session missing or invalid", new_entry)
-                _record_abuse('invalid_session', request.remote_addr, new_entry.get('session_id'))
-                return jsonify({"error": "VocaGuard session missing or invalid"}), 400
-            
-            if datetime.fromisoformat(session['expires']) < datetime.utcnow():
-                log_rejection("VocaGuard session expired", new_entry)
-                _record_abuse('session_expired', request.remote_addr, new_entry.get('session_id'))
+            # VocaGuard validation (optional based on flag)
+            if ENABLE_VOCAGUARD:
+                # Fetch only this session (no full-table load)
+                session = get_session_by_id(new_entry['session_id'])
+                if not session:
+                    log_rejection("VocaGuard session missing or invalid", new_entry)
+                    _record_abuse('invalid_session', request.remote_addr, new_entry.get('session_id'))
+                    return jsonify({"error": "VocaGuard session missing or invalid"}), 400
+                
+                if datetime.fromisoformat(session['expires']) < datetime.utcnow():
+                    log_rejection("VocaGuard session expired", new_entry)
+                    _record_abuse('session_expired', request.remote_addr, new_entry.get('session_id'))
+                    delete_session(new_entry['session_id'])
+                    return jsonify({"error": "VocaGuard session expired"}), 400
+                
+                # Validate submission against session progress
+                is_valid, error_message = vocaguard_validator.validate_submission(
+                    session_floor=session['floor'],
+                    session_level=session['level'],
+                    submitted_floor=new_entry['floor'],
+                    submitted_level=new_entry['level']
+                )
+                
+                if not is_valid:
+                    log_rejection("VocaGuard progress mismatch", new_entry)
+                    _record_abuse('validate_mismatch', request.remote_addr, new_entry.get('session_id'),
+                                 {'session_floor': session['floor'], 'session_level': session['level'],
+                                  'submitted_floor': new_entry['floor'], 'submitted_level': new_entry['level']})
+                    return jsonify({"error": error_message}), 400
+                
+                # Verify proof-of-work challenge only for sessions created via /api/start (not legacy)
+                if session.get('created_via') == 'api_start':
+                    challenge_id = new_entry.get('challenge_id')
+                    challenge_proof = new_entry.get('challenge_proof')
+                    
+                    if not challenge_id or not challenge_proof:
+                        log_rejection("Proof-of-work challenge or proof missing", new_entry)
+                        _record_abuse('pow_missing', request.remote_addr, new_entry.get('session_id'),
+                                     {'challenge_id': bool(challenge_id), 'challenge_proof': bool(challenge_proof)})
+                        return jsonify({"error": "Proof-of-work challenge verification required"}), 400
+                    
+                    pow_valid, pow_error = vocaguard_validator.verify_challenge_proof(
+                        session_id=new_entry['session_id'],
+                        challenge_id=challenge_id,
+                        client_proof=challenge_proof
+                    )
+                    
+                    if not pow_valid:
+                        log_rejection("Proof-of-work verification failed", new_entry)
+                        _record_abuse('pow_verification_failed', request.remote_addr, new_entry.get('session_id'),
+                                     {'reason': pow_error})
+                        return jsonify({"error": pow_error}), 400
+                
+                # Expire session after successful leaderboard submission
                 delete_session(new_entry['session_id'])
-                return jsonify({"error": "VocaGuard session expired"}), 400
             
-            if session['floor'] != new_entry['floor'] or session['level'] != new_entry['level']:
-                log_rejection("VocaGuard progress mismatch", new_entry)
-                _record_abuse('validate_mismatch', request.remote_addr, new_entry.get('session_id'),
-                             {'session_floor': session['floor'], 'session_level': session['level'],
-                              'submitted_floor': new_entry['floor'], 'submitted_level': new_entry['level']})
-                return jsonify({"error": "VocaGuard progress mismatch"}), 400
-            
-            # Expire session after successful leaderboard submission
-            delete_session(new_entry['session_id'])
             # Insert into SQLite and return sorted list
-            entry_to_store = {k: v for k, v in new_entry.items() if k not in ('session_id', 'captcha_token', 'hcaptcha_token')}
+            entry_to_store = {k: v for k, v in new_entry.items() if k not in ('session_id', 'captcha_token', 'hcaptcha_token', 'challenge_id', 'challenge_proof')}
             conn = get_db_connection()
             cur = conn.cursor()
             cur.execute(
@@ -1289,7 +1515,7 @@ def pigeon_delivery():
     }), 200
 
 # Get abuse status (whitelisted IPs only)
-@app.route('/api/abuse/status', methods=['GET'])
+@app.route('/api/abuse', methods=['GET']) # simplified abuse status endpoint
 def abuse_status():
     # Whitelist-based access control
     if not _is_ip_whitelisted(request.remote_addr):
@@ -1482,6 +1708,15 @@ def session_purge_worker():
     while True:
         try:
             purge_old_sessions()
+            # Also clean up expired proof-of-work challenges
+            if ENABLE_VOCAGUARD:
+                expired_count = vocaguard_validator.cleanup_expired_challenges()
+                if expired_count > 0:
+                    log_to_general_json({
+                        'ts': int(datetime.utcnow().timestamp()),
+                        'event': 'pow_challenge_cleanup',
+                        'expired_count': expired_count
+                    })
         except Exception as e:
             log_error('session_purge_worker', e)
         time.sleep(BACKGROUND_WORKER_SLEEP_SECONDS)
