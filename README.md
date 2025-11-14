@@ -21,21 +21,24 @@ A Flask-based REST API for the TardQuest game featuring anti-cheat protection, l
 ### Installation
 
 1. **Clone the repository**
+   
    ```bash
    git clone https://github.com/VocaPepper/tardquest-api.git
    cd tardquest-api
    ```
 
 2. **Install dependencies**
+   
    ```bash
    pip install -r requirements.txt
    ```
 
 3. **Run the API (Development Server)**
+   
    ```bash
    python TardQuest_API.py
    ```
-
+   
    The API will start on `http://0.0.0.0:9601`
 
 ## Configuration
@@ -56,35 +59,37 @@ ENABLE_VOCAGUARD=true
 
 The following constants are configured in `TardQuest_API.py`:
 
-| Setting | Value | Purpose |
-|---------|-------|---------|
-| **API Port** | 9601 | Server listening port |
-| **API Version** | 3.0.251109 | Format: MAJOR.MINOR.YYMMDD for backward compatibility |
-| **Session Timeout** | 120 minutes | Duration before session expires (resets on each update) |
-| **Session Purge Age** | 7 days | Old sessions automatically deleted |
-| **Max Pigeons** | 20 per session | Maximum carrier pigeons a player can hold |
-| **Message Length** | 420 characters | Maximum message length via pigeon |
-| **Rate Limits** | 10/min (update), 5/min (message), 20/hr (pigeon purchase) | Per IP address |
-| **PoW Challenge Expiry** | 24 hours | Challenge validity window before expiration |
+| Setting                  | Value                                                     | Purpose                                                 |
+| ------------------------ | --------------------------------------------------------- | ------------------------------------------------------- |
+| **API Port**             | 9601                                                      | Server listening port                                   |
+| **API Version**          | 3.0.251109                                                | Format: MAJOR.MINOR.YYMMDD for backward compatibility   |
+| **Session Timeout**      | 120 minutes                                               | Duration before session expires (resets on each update) |
+| **Session Purge Age**    | 7 days                                                    | Old sessions automatically deleted                      |
+| **Max Pigeons**          | 20 per session                                            | Maximum carrier pigeons a player can hold               |
+| **Message Length**       | 420 characters                                            | Maximum message length via pigeon                       |
+| **Rate Limits**          | 10/min (update), 5/min (message), 20/hr (pigeon purchase) | Per IP address                                          |
+| **PoW Challenge Expiry** | 24 hours                                                  | Challenge validity window before expiration             |
 
 ### Logging & Configuration Files
 
 All runtime data and logs are stored as JSON files:
 
-| File | Purpose |
-|------|---------|
-| `tardquest.db` | SQLite database (auto-created) |
+| File             | Purpose                                                            |
+| ---------------- | ------------------------------------------------------------------ |
+| `tardquest.db`   | SQLite database (auto-created)                                     |
 | `vocaguard.json` | VocaGuard validation errors, rejections, and anti-cheat detections |
-| `log.json` | General server errors and non-VocaGuard issues |
-| `flagged.json` | Flagged IP addresses with abuse metrics and expiration times |
-| `whitelist.json` | Whitelisted admin IP addresses for `/api/abuse` endpoint |
+| `log.json`       | General server errors and non-VocaGuard issues                     |
+| `flagged.json`   | Flagged IP addresses with abuse metrics and expiration times       |
+| `whitelist.json` | Whitelisted admin IP addresses for `/api/abuse` endpoint           |
 
 ## API Endpoints
 
 ### Health & Status
+
 - `GET /api/status` - Health check with API version information
 
 ### Session Management
+
 - `POST /api/start` - Create new session with version validation and PoW challenge
   - **Required**: `version` field (client API version, major.minor must match server)
   - **Returns**: `session_id`, `server_version`, and optionally `challenge_id` + `challenge_secret` if PoW enabled
@@ -93,6 +98,7 @@ All runtime data and logs are stored as JSON files:
   - **Returns**: `{"status": "updated"}` on success
 
 ### Leaderboard
+
 - `GET /api/leaderboard` - Retrieve ranked list of player scores
 - `POST /api/leaderboard` - Submit score to leaderboard
   - **Required**: `session_id`, `name`, `floor`, `level`
@@ -100,15 +106,18 @@ All runtime data and logs are stored as JSON files:
   - **Note**: Validates submission matches session progress if PoW enabled
 
 ### Carrier Pigeon (Messaging)
+
 - `GET /api/pigeon/inventory?session_id={id}` - Check pigeon count for session
 - `POST /api/pigeon/purchase` - Purchase a carrier pigeon
 - `POST /api/pigeon/send` - Send a message via pigeon
 - `POST /api/pigeon/delivery` - Receive pending messages
 
 ### Admin (IP Whitelisted Only)
+
 - `GET /api/abuse` - View detailed abuse metrics and flagged IPs (requires whitelisted IP)
 
 ### Legacy VocaGuard Endpoints (Deprecated, use `/api/start` and `/api/update`)
+
 - `POST /api/vocaguard/start` - Legacy session creation
 - `POST /api/vocaguard/update` - Legacy progress update
 - `POST /api/vocaguard/validate` - Legacy submission validation
@@ -129,6 +138,7 @@ VocaGuard is a modular anti-cheat system that validates game progress through mu
 ### How It Works
 
 #### Session Creation Flow
+
 ```
 Client: POST /api/start with version "3.0.251109"
          ↓
@@ -142,6 +152,7 @@ Server: Return session_id, challenge_id, challenge_secret to client
 ```
 
 #### Submission Flow
+
 ```
 Client: Compute proof = SHA256(challenge_secret + session_id)
          ↓
@@ -160,12 +171,12 @@ Server: Post to leaderboard if all checks pass
 
 The validator enforces these rules during `/api/update` calls:
 
-| Rule | Description |
-|------|-------------|
-| **Floor Regression** | Floor cannot decrease from current value |
-| **Level Regression** | Level cannot decrease on the same floor |
-| **Floor Skips** | Can only advance 1 floor at a time (no jumping) |
-| **Level Jumps** | Can only advance 1 level at a time on same floor |
+| Rule                 | Description                                          |
+| -------------------- | ---------------------------------------------------- |
+| **Floor Regression** | Floor cannot decrease from current value             |
+| **Level Regression** | Level cannot decrease on the same floor              |
+| **Floor Skips**      | Can only advance 1 floor at a time (no jumping)      |
+| **Level Jumps**      | Can only advance 1 level at a time on same floor     |
 | **Level Speed Hack** | Minimum 10 seconds required between level increments |
 | **Floor Speed Hack** | Minimum 10 seconds required between floor increments |
 
@@ -190,6 +201,7 @@ ENABLE_VOCAGUARD=true
 The API automatically creates `tardquest.db` with the following tables:
 
 #### sessions
+
 ```sql
 CREATE TABLE sessions (
     session_id TEXT PRIMARY KEY,
@@ -208,6 +220,7 @@ CREATE TABLE sessions (
 ```
 
 #### leaderboard
+
 ```sql
 CREATE TABLE leaderboard (
     name TEXT,
@@ -217,6 +230,7 @@ CREATE TABLE leaderboard (
 ```
 
 #### pigeons
+
 ```sql
 CREATE TABLE pigeons (
     from_session_id TEXT,
@@ -301,6 +315,7 @@ if not is_valid:
 ```
 
 **Return values:**
+
 - `is_valid` (bool): Whether update passed all checks
 - `error_message` (str): Human-readable error description
 - `abuse_details` (dict): Cheat detection metadata with `cheat_type` and relevant values
@@ -352,91 +367,124 @@ print(f"Removed {expired_count} expired challenges")
 
 ## Client Integration
 
-### Configuration Overview
+### Architecture
 
-Each client component requires configuration with the API base URL. Update the following files in your TardQuest client:
+The client consists of three separate modules that work together:
 
-| Component | File | Config Variable |
-|-----------|------|-----------------|
-| Leaderboard & Anti-Cheat | `tardboard.js` | `API_BASE`, `TURNSTILE_SITE_KEY` |
-| Carrier Pigeon Messaging | `pigeon.js` | `API_BASE` |
-| Game Merchant | `game.html` | Fetch URL in merchant code |
-| API Test Suite | `APITest.html` | `API_BASE`, `CLIENT_API_VERSION`, `TURNSTILE_SITE_KEY` |
+1. **TardAPI** - Core session management and progress tracking
+2. **TardBoard** - Leaderboard submission and captcha verification  
+3. **PigeonMessaging** - Carrier pigeon message system
 
-### TardBoard (Leaderboard + Anti-Cheat)
+Each module is independent and can be extended or replaced with custom implementations.
 
-Edit `tardboard.js`:
+### Module: TardAPI (Session Management)
+
+**File**: `tardAPI.js`
+
+Provides centralized session management, PoW challenge handling, and progress updates.
+
+#### Configuration
+
+Edit `tardAPI.js` to set the API endpoint and client version:
 
 ```javascript
-// API Configuration
+// --- Configuration ---
+
+/** @const {string} Base URL for all API endpoints */
 const API_BASE = 'http://your-domain-or-ip:9601';
 
-// Cloudflare Turnstile Captcha
-const TURNSTILE_SITE_KEY = 'your-site-key';
+/** @const {string} Client API version (major.minor must match server) */
+const CLIENT_API_VERSION = '3.0.YYDDMM';
+
+/** @const {string} LocalStorage key for session ID persistence */
+const LS_SESSION_KEY = 'tardquestSID';
+
+/** @const {string} LocalStorage key for PoW challenge data */
+const LS_CHALLENGE_KEY = 'vocaguardChallengeData';
 ```
 
-When creating a session, the client sends:
-```javascript
-fetch(`${API_BASE}/api/start`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ version: '3.0.251109' })  // Must match server major.minor
-})
-```
+#### Key Features
 
-On submission, if PoW is enabled, client computes:
-```javascript
-const proof = SHA256(challengeSecret + sessionId);
-// Include proof in leaderboard submission
-```
+- **Automatic session creation** - Creates session on first progress update
+- **PoW challenge handling** - Generates proof for leaderboard submissions
+- **Progress monitoring** - Tracks floor/level changes automatically
+- **Session persistence** - Stores session ID in localStorage
+- **Version validation** - Sends client version to server for compatibility check
 
-### Carrier Pigeon (Messaging System)
-
-Edit `pigeon.js`:
+#### Public API
 
 ```javascript
-// API Configuration
-const API_BASE = 'http://your-domain-or-ip:9601';
+// Session Management
+await TardAPI.createSession()           // Create new session
+await TardAPI.validateSession()         // Validate current session
+await TardAPI.updateProgress()          // Send progress to server (automatic)
+
+// Submission
+await TardAPI.submitScore(name, options) // Submit leaderboard score
+
+// Leaderboard
+await TardAPI.getLeaderboard(options)   // Fetch leaderboard
+
+// Utilities
+TardAPI.checkApiStatus()                // Check if API is accessible
+TardAPI.getGameState()                  // Get current floor/level
+TardAPI.loadSessionFromStorage()        // Restore session from storage
+TardAPI.clearSession()                  // Clear session and storage
+
+// Properties
+TardAPI.sessionId                       // Get current session ID
+TardAPI.hasActiveSession                // Check if session exists
+TardAPI.hasChallenge                    // Check if PoW challenge exists
+TardAPI.challenge                       // Get challenge data
 ```
 
-> [!WARNING]
-> Carrier Pigeon is currently dependent on `tardboard.js` for session management!
-
-### Game Merchant (Pigeon Purchase)
-
-Edit `game.html` and update the merchant's pigeon purchase code:
+#### Usage Example
 
 ```javascript
-fetch('http://your-domain-or-ip:9601/api/pigeon/purchase', {
-   method: 'POST',
-   headers: { 'Content-Type': 'application/json' },
-   body: JSON.stringify({ session_id: sessionId })
-})
+// Session is created automatically on first progress update
+// For manual creation:
+const result = await TardAPI.createSession();
+if (result.success) {
+    console.log('Session created:', result.session_id);
+}
+
+// Progress updates are sent automatically every second
+// Progress is monitored in the background and sent when floor/level changes
+
+// Submit a score (with automatic PoW proof computation)
+const submission = await TardAPI.submitScore('ABC', { captcha_token: token });
+if (submission.success) {
+    console.log('Score submitted!');
+}
 ```
 
-### API Test Suite
+### Module: TardBoard (Leaderboard)
 
-Edit `APITest.html` for local testing:
+**File**: `tardboard.js`
+
+Handles leaderboard submission UI and captcha integration.
+
+#### Configuration
+
+Edit `tardboard.js` to set the captcha site key:
 
 ```javascript
-// API Configuration
-const API_BASE = 'http://your-domain-or-ip:9601';
-const CLIENT_API_VERSION = '3.0.x';  // Must match server major.minor version
+// --- Constants ---
 
-// Cloudflare Turnstile Captcha
-const TURNSTILE_SITE_KEY = 'your-site-key';
+/** @const {string} Cloudflare Turnstile site key for captcha verification */
+const TURNSTILE_SITE_KEY = 'your_turnstile_site_key';
 ```
 
-When starting a new session in tests:
-```javascript
-fetch(`${API_BASE}/api/start`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ version: CLIENT_API_VERSION })
-})
-```
+### Script Loading Order
 
-The test suite automatically handles PoW computation, challenge storage, and verification.
+**Critical**: Load scripts in this order to ensure all dependencies are satisfied:
+
+```html
+<script src="scripts/tardAPI.js"></script>      <!-- Must be first -->
+<script src="scripts/tardboard.js"></script>    <!-- Depends on TardAPI -->
+<script src="scripts/pigeon.js"></script>       <!-- Depends on TardAPI -->
+<!-- ... other scripts ... -->
+```
 
 ## Access Control
 
