@@ -63,7 +63,7 @@ The following constants are configured in `TardQuest_API.py`:
 | ------------------------ | --------------------------------------------------------- | ------------------------------------------------------- |
 | **API Port**             | 9601                                                      | Server listening port                                   |
 | **API Version**          | 3.1.260111                                                | Format: MAJOR.MINOR.YYMMDD   |
-| **Min Client Version**   | 3.0.251123                                                | Minimum supported client version for session creation   |
+| **Min Client Version**   | 3.0.251113                                                | Minimum supported client version for session creation   |
 | **Session Timeout**      | 120 minutes                                               | Duration before session expires (resets on each update) |
 | **Session Purge Age**    | 7 days                                                    | Old sessions automatically deleted                      |
 | **Max Pigeons**          | 20 per session                                            | Maximum carrier pigeons a player can hold               |
