@@ -14,3 +14,7 @@ ssl/
 
 # Python cache files
 __pycache__/
+
+# IDE specific files
+.vscode/
+.github/

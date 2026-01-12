@@ -62,7 +62,8 @@ The following constants are configured in `TardQuest_API.py`:
 | Setting                  | Value                                                     | Purpose                                                 |
 | ------------------------ | --------------------------------------------------------- | ------------------------------------------------------- |
 | **API Port**             | 9601                                                      | Server listening port                                   |
-| **API Version**          | 3.0.251109                                                | Format: MAJOR.MINOR.YYMMDD for backward compatibility   |
+| **API Version**          | 3.1.260111                                                | Format: MAJOR.MINOR.YYMMDD   |
+| **Min Client Version**   | 3.0.251123                                                | Minimum supported client version for session creation   |
 | **Session Timeout**      | 120 minutes                                               | Duration before session expires (resets on each update) |
 | **Session Purge Age**    | 7 days                                                    | Old sessions automatically deleted                      |
 | **Max Pigeons**          | 20 per session                                            | Maximum carrier pigeons a player can hold               |
@@ -94,7 +95,7 @@ All runtime data and logs are stored as JSON files:
   - **Required**: `version` field (client API version, major.minor must match server)
   - **Returns**: `session_id`, `server_version`, and optionally `challenge_id` + `challenge_secret` if PoW enabled
 - `POST /api/update` - Update game progress with anti-cheat validation
-  - **Required**: `session_id`, `floor`, `level`
+  - **Required**: `session_id`, `floor`, `level`, `exp`
   - **Returns**: `{"status": "updated"}` on success
 
 ### Leaderboard
@@ -115,15 +116,6 @@ All runtime data and logs are stored as JSON files:
 ### Admin (IP Whitelisted Only)
 
 - `GET /api/abuse` - View detailed abuse metrics and flagged IPs (requires whitelisted IP)
-
-### Legacy VocaGuard Endpoints (Deprecated, use `/api/start` and `/api/update`)
-
-- `POST /api/vocaguard/start` - Legacy session creation
-- `POST /api/vocaguard/update` - Legacy progress update
-- `POST /api/vocaguard/validate` - Legacy submission validation
-
-> [!WARNING]
-> These endpoints will be removed after client API updates hit production.
 
 ## VocaGuard Anti-Cheat System
 

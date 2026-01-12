@@ -3,7 +3,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 import json
 import os
 import uuid
@@ -43,7 +43,8 @@ session_ops_lock = Lock()
 
 # --- Application Configuration Constants ---
 # Major.Minor.Patch
-API_VERSION = "3.0.251110"
+API_VERSION = "3.1.260111"
+MIN_CLIENT_VERSION = "3.0.251123" # Minimum supported client version
 # Server-Client check looks at Major.Minor only for compatibility, patch is numbered by date last edited in YYMMDD format.
 # Legacy endpoints ignore this check, as they are deprecated and will be removed in future versions.
 
@@ -156,7 +157,7 @@ init_db()
 # Session management helper functions
 
 # Save a single session to database (atomic operation, thread-safe)
-def save_session(session_id: str, session: Dict[str, any]) -> None:
+def save_session(session_id: str, session: Dict[str, Any]) -> None:
     """
     Save a single session to database using atomic INSERT OR REPLACE.
     
@@ -171,11 +172,12 @@ def save_session(session_id: str, session: Dict[str, any]) -> None:
         # Try to insert with created_via column
         try:
             cur.execute(
-                'INSERT OR REPLACE INTO sessions (session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified, created_via) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                'INSERT OR REPLACE INTO sessions (session_id, floor, level, exp, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified, created_via) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (
                     session_id,
                     int(session.get('floor', 1)),
                     int(session.get('level', 1)),
+                    int(session.get('exp', 0)),
                     session.get('expires', ''),
                     session.get('created', ''),
                     json.dumps(session.get('inv', {})),
@@ -188,13 +190,14 @@ def save_session(session_id: str, session: Dict[str, any]) -> None:
                 )
             )
         except Exception:
-            # Fallback: column might not exist yet, insert without it
+            # Fallback: column might not exist yet, insert without created_via
             cur.execute(
-                'INSERT OR REPLACE INTO sessions (session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                'INSERT OR REPLACE INTO sessions (session_id, floor, level, exp, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (
                     session_id,
                     int(session.get('floor', 1)),
                     int(session.get('level', 1)),
+                    int(session.get('exp', 0)),
                     session.get('expires', ''),
                     session.get('created', ''),
                     json.dumps(session.get('inv', {})),
@@ -214,7 +217,7 @@ def save_session(session_id: str, session: Dict[str, any]) -> None:
 # Load pigeons from database
 
 # Save a single pigeon to database (atomic operation, thread-safe)
-def save_pigeon(pigeon: Dict[str, any]) -> None:
+def save_pigeon(pigeon: Dict[str, Any]) -> None:
     """
     Save a single pigeon message to database using atomic INSERT OR REPLACE.
     
@@ -259,35 +262,57 @@ def get_session_by_id(session_id: str) -> Optional[Dict]:
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Try to fetch with created_via column first
+        # Try to fetch with exp + created_via columns first
         try:
-            cur.execute('SELECT session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified, created_via FROM sessions WHERE session_id = ?', (session_id,))
+            cur.execute('SELECT session_id, floor, level, exp, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified, created_via FROM sessions WHERE session_id = ?', (session_id,))
             row = cur.fetchone()
         except Exception:
-            # Fallback: column might not exist, fetch without it
-            cur.execute('SELECT session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified FROM sessions WHERE session_id = ?', (session_id,))
-            row = cur.fetchone()
-            if row:
-                row = tuple(list(row) + ['api_start'])  # Add default created_via
+            try:
+                # Fallback: exp present but created_via missing
+                cur.execute('SELECT session_id, floor, level, exp, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified FROM sessions WHERE session_id = ?', (session_id,))
+                row = cur.fetchone()
+                if row:
+                    row = tuple(list(row) + ['api_start'])
+            except Exception:
+                # Fallback: legacy schema without exp or created_via
+                cur.execute('SELECT session_id, floor, level, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified FROM sessions WHERE session_id = ?', (session_id,))
+                row = cur.fetchone()
+                if row:
+                    # Insert default exp=0 and created_via='api_start'
+                    row = tuple(list(row[:3]) + [0] + list(row[3:]) + ['api_start'])
         
         conn.close()
         
         if not row:
             return None
         
+        # Normalize row to expected shape: (sid, floor, level, exp, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified, created_via)
+        if len(row) == 13:
+            sid, floor, level, exp_val, expires, created, inv_raw, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified, created_via = row
+        elif len(row) == 12:
+            sid, floor, level, exp_val, expires, created, inv_raw, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified = row
+            created_via = 'api_start'
+        elif len(row) == 11:
+            sid, floor, level, expires, created, inv_raw, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified = row
+            exp_val = 0
+            created_via = 'api_start'
+        else:
+            return None
+
         return {
-            'session_id': row[0],
-            'floor': int(row[1]),
-            'level': int(row[2]),
-            'expires': row[3],
-            'created': row[4],
-            'inv': json.loads(row[5]) if row[5] else {},
-            'last_level_update': row[6],
-            'last_floor_update': row[7],
-            'last_message_received_at': row[8],
-            'last_from_session_delivered': row[9],
-            'verified': bool(row[10]),
-            'created_via': row[11] if len(row) > 11 else 'api_start'
+            'session_id': sid,
+            'floor': int(floor),
+            'level': int(level),
+            'exp': int(exp_val),
+            'expires': expires,
+            'created': created,
+            'inv': json.loads(inv_raw) if inv_raw else {},
+            'last_level_update': last_level_update,
+            'last_floor_update': last_floor_update,
+            'last_message_received_at': last_message_received_at,
+            'last_from_session_delivered': last_from_session_delivered,
+            'verified': bool(verified),
+            'created_via': created_via
         }
     except Exception as e:
         log_error('get_session_by_id', e, {'session_id': session_id})
@@ -320,6 +345,9 @@ def update_session(session_id: str, updates: Dict) -> bool:
             if 'level' in updates:
                 set_clauses.append('level = ?')
                 params.append(int(updates['level']))
+            if 'exp' in updates:
+                set_clauses.append('exp = ?')
+                params.append(int(updates['exp']))
             if 'expires' in updates:
                 set_clauses.append('expires = ?')
                 params.append(updates['expires'])
@@ -706,7 +734,7 @@ def _save_whitelist(whitelist: List[str]) -> None:
         log_error('save_whitelist', e)
 
 # Check if an IP is whitelisted
-def _is_ip_whitelisted(ip: str) -> bool:
+def _is_ip_whitelisted(ip: Optional[str]) -> bool:
     """
     Check if an IP address is in the whitelist.
     
@@ -716,11 +744,13 @@ def _is_ip_whitelisted(ip: str) -> bool:
     Returns:
         True if IP is whitelisted, False otherwise
     """
+    if not ip:
+        return False
     whitelist = _load_whitelist()
     return str(ip) in whitelist
 
 # Record an abuse event
-def _record_abuse(metric: str, ip: str, session_id: Optional[str] = None, extra: Optional[Dict] = None) -> None:
+def _record_abuse(metric: str, ip: Optional[str], session_id: Optional[str] = None, extra: Optional[Dict] = None) -> None:
     """
     Record an abuse event and evaluate if IP should be flagged.
     
@@ -733,9 +763,10 @@ def _record_abuse(metric: str, ip: str, session_id: Optional[str] = None, extra:
     try:
         now_ts = int(datetime.utcnow().timestamp())
         # Create event for vocaguard.json logging
+        safe_ip = ip or "unknown"
         event = {
             'ts': now_ts,
-            'ip': ip,
+            'ip': safe_ip,
             'metric': metric
         }
         if session_id:
@@ -749,7 +780,7 @@ def _record_abuse(metric: str, ip: str, session_id: Optional[str] = None, extra:
         
         # Count recent abuse events from vocaguard.json to determine flagging
         recent_events = _load_vocaguard_events()
-        ip_events = [e for e in recent_events if e.get('ip') == ip]
+        ip_events = [e for e in recent_events if e.get('ip') == safe_ip]
         
         # Count events by metric
         counts = {}
@@ -767,7 +798,7 @@ def _record_abuse(metric: str, ip: str, session_id: Optional[str] = None, extra:
         if should_flag:
             # Update flagged IPs in flagged.json
             flagged = _load_flagged_ips()
-            flagged[ip] = {
+            flagged[safe_ip] = {
                 'until': int(now_ts + ABUSE_FLAG_DURATION_SECONDS),
                 'counts': counts
             }
@@ -777,7 +808,7 @@ def _record_abuse(metric: str, ip: str, session_id: Optional[str] = None, extra:
         log_error('record_abuse', e)
 
 # Check if an IP is flagged for abuse
-def _is_flagged(ip: str) -> Tuple[bool, Optional[Dict]]:
+def _is_flagged(ip: Optional[str]) -> Tuple[bool, Optional[Dict]]:
     """
     Check if an IP is currently flagged for abuse, with auto-expiration of old flags.
     
@@ -787,6 +818,8 @@ def _is_flagged(ip: str) -> Tuple[bool, Optional[Dict]]:
     Returns:
         Tuple of (is_flagged: bool, flag_info: dict or None)
     """
+    if not ip:
+        return False, None
     try:
         flagged = _load_flagged_ips()
         now_ts = int(datetime.utcnow().timestamp())
@@ -857,19 +890,20 @@ def tardquest_start():
             "reason": "Missing 'version' field in request"
         }), 400
     
-    # Check version compatibility (compare major.minor, ignore patch/date)
-    def parse_version(version_str: str) -> tuple:
-        """Parse version string into (major, minor) tuple"""
+    # Check version compatibility: require major.minor match server and not below MIN_CLIENT_VERSION
+    def parse_version(version_str: str) -> Optional[Tuple[int, int, int]]:
+        """Parse version string into (major, minor, patch) tuple"""
         try:
             parts = version_str.split('.')
-            return (int(parts[0]), int(parts[1]))
+            return (int(parts[0]), int(parts[1]), int(parts[2]))
         except (IndexError, ValueError):
             return None
     
     client_version_tuple = parse_version(client_version)
     server_version_tuple = parse_version(API_VERSION)
+    min_client_tuple = parse_version(MIN_CLIENT_VERSION)
     
-    if not client_version_tuple or not server_version_tuple:
+    if not client_version_tuple or not server_version_tuple or not min_client_tuple:
         return jsonify({
             "error": "Invalid version format",
             "server_version": API_VERSION,
@@ -877,14 +911,15 @@ def tardquest_start():
             "reason": "Version must be in format: major.minor.patch"
         }), 400
     
-    # Reject if major.minor doesn't match
-    if client_version_tuple != server_version_tuple:
+    # Reject if below minimum supported client version (full comparison)
+    if client_version_tuple < min_client_tuple:
         return jsonify({
-            "error": "API version mismatch",
+            "error": "Client version too old",
             "server_version": API_VERSION,
             "client_version": client_version,
-            "reason": f"Expected {server_version_tuple[0]}.{server_version_tuple[1]} or newer"
-        }), 409  # 409 Conflict for version mismatch
+            "minimum_required": MIN_CLIENT_VERSION,
+            "reason": f"Update client to at least {MIN_CLIENT_VERSION}"
+        }), 400
     
     # Version check passed, proceed with session creation
     session_id = str(uuid.uuid4())
@@ -927,6 +962,9 @@ def vocaguard_update():
     # Updates session progress with optional anti-cheat validation
     data = request.get_json() or {}
     session_id = data.get('session_id')
+
+    if not isinstance(session_id, str) or not session_id:
+        return jsonify({"error": "session_id required"}), 400
     
     # VALIDATE TYPES EARLY to prevent TypeError (type safety fix)
     try:
@@ -974,9 +1012,10 @@ def vocaguard_update():
             abuse_details = abuse_details or {}
             _record_abuse(abuse_details.get('cheat_type', 'unknown_cheat'), 
                          request.remote_addr, session_id, abuse_details)
+            safe_message = error_message or "Invalid progress update"
             return jsonify({
-                "error": error_message,
-                "detail": f"Current floor: {current_floor}, attempted: {floor}" if "floor" in error_message.lower() else f"Current level: {current_level}, attempted: {level}"
+                "error": safe_message,
+                "detail": f"Current floor: {current_floor}, attempted: {floor}" if "floor" in safe_message.lower() else f"Current level: {current_level}, attempted: {level}"
             }), 400
     
     # Update progress with new timestamps for floor increments
@@ -994,153 +1033,6 @@ def vocaguard_update():
     })
 
     return jsonify({"status": "updated"}), 200
-
-# Legacy VocaGuard start session endpoint - deprecated and will be removed after transition
-@app.route('/api/vocaguard/start', methods=['POST'])
-def vocaguard_start():
-    # Starts a new anti-cheat session and returns session_id
-    session_id = str(uuid.uuid4())
-    expires = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
-    
-    # Use save_session (atomic) instead of load_sessions/save_sessions pattern
-    new_session = {
-        "session_id": session_id,
-        "floor": 1,
-        "level": 1,
-        "exp": 0,
-        "expires": expires,
-        "created": datetime.utcnow().isoformat(),
-        "inv": {"carrierPigeon": 0},
-        "last_floor_update": None,
-        "last_message_received_at": None,
-        "last_from_session_delivered": None,
-        "verified": False,
-        "created_via": "vocaguard_legacy"
-    }
-    save_session(session_id, new_session)
-
-    return jsonify({
-        "session_id": session_id,
-    }), 200
-
-# Update session progress with anti-cheat checks - deprecated and will be removed after transition
-@app.route('/api/vocaguard/update', methods=['POST'])
-@limiter.limit("10 per minute")  # 10 updates per minute per IP
-def vocaguard_update_legacy():
-    # Updates session progress with optional anti-cheat validation
-    data = request.get_json() or {}
-    session_id = data.get('session_id')
-    
-    # VALIDATE TYPES EARLY to prevent TypeError (type safety fix)
-    try:
-        floor = int(data.get('floor', 0))
-        level = int(data.get('level', 0))
-        exp = int(data.get('exp', 0))
-    except (ValueError, TypeError):
-        _record_abuse('invalid_progress_type', request.remote_addr, session_id,
-                     {'floor_val': data.get('floor'), 'level_val': data.get('level'), 'exp_val': data.get('exp')})
-        return jsonify({"error": "Floor, level, and exp must be valid integers"}), 400
-    
-    # Fetch only this session (no full-table load)
-    session = get_session_by_id(session_id)
-    if not session:
-        _record_abuse('invalid_session', request.remote_addr, session_id, 
-                     {'attempted_session': session_id})
-        return jsonify({"error": "Invalid session token"}), 400
-    
-    # Check expiration
-    if datetime.fromisoformat(session['expires']) < datetime.utcnow():
-        _record_abuse('session_expired', request.remote_addr, session_id)
-        delete_session(session_id)
-        return jsonify({"error": "Session expired"}), 400
-    
-    current_floor = session['floor']
-    current_level = session['level']
-    current_exp = session.get('exp', 0)
-    last_floor_update = session.get('last_floor_update')
-    
-    # Run anti-cheat validation if enabled
-    if ENABLE_VOCAGUARD:
-        is_valid, error_message, abuse_details = vocaguard_validator.validate_progress_update(
-            current_floor=current_floor,
-            current_level=current_level,
-            current_exp=current_exp,
-            new_floor=floor,
-            new_level=level,
-            new_exp=exp,
-            session_id=session_id,
-            last_floor_update=last_floor_update
-        )
-        
-        if not is_valid:
-            # Record abuse and return error
-            abuse_details = abuse_details or {}
-            _record_abuse(abuse_details.get('cheat_type', 'unknown_cheat'), 
-                         request.remote_addr, session_id, abuse_details)
-            return jsonify({
-                "error": error_message,
-                "detail": f"Current floor: {current_floor}, attempted: {floor}" if "floor" in error_message.lower() else f"Current level: {current_level}, attempted: {level}"
-            }), 400
-    
-    # Update progress with new timestamps for floor increments
-    now = datetime.utcnow().isoformat()
-    new_last_floor_update = now if floor > current_floor else last_floor_update
-    
-    # Update session progress only if valid (targeted UPDATE, not full rewrite)
-    new_expires = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
-    update_session(session_id, {
-        'floor': floor,
-        'level': level,
-        'exp': exp,
-        'expires': new_expires,
-        'last_floor_update': new_last_floor_update
-    })
-
-    return jsonify({"status": "updated"}), 200
-
-# Validate final submission before leaderboard post - deprecated and will be removed after transition; handled in /api/leaderboard now
-@app.route('/api/vocaguard/validate', methods=['POST'])
-def vocaguard_validate():
-    # Validates final submission before leaderboard post
-    data = request.get_json() or {}
-    session_id = data.get('session_id')
-    
-    # VALIDATE TYPES EARLY (type safety fix)
-    try:
-        floor = int(data.get('floor', 0))
-        level = int(data.get('level', 0))
-    except (ValueError, TypeError):
-        _record_abuse('invalid_progress_type', request.remote_addr, session_id,
-                     {'floor_val': data.get('floor'), 'level_val': data.get('level')})
-        return jsonify({"result": "fail", "reason": "Floor and level must be valid integers"}), 400
-    
-    # Fetch only this session (no full-table load)
-    session = get_session_by_id(session_id)
-    if not session:
-        _record_abuse('invalid_session', request.remote_addr, session_id, 
-                     {'attempted_session': session_id})
-        return jsonify({"result": "fail", "reason": "Invalid session"}), 400
-    
-    if datetime.fromisoformat(session['expires']) < datetime.utcnow():
-        _record_abuse('session_expired', request.remote_addr, session_id)
-        delete_session(session_id)
-        return jsonify({"result": "fail", "reason": "Session expired"}), 400
-    
-    if session['floor'] == floor and session['level'] == level:
-        # Do NOT delete or expire sessions here!
-        return jsonify({"result": "pass"}), 200
-    else:
-        # Log validation mismatch as abuse attempt
-        _record_abuse('validate_mismatch', request.remote_addr, session_id,
-                     {'session_floor': session['floor'], 'session_level': session['level'],
-                      'submitted_floor': floor, 'submitted_level': level})
-        return jsonify({"result": "fail", "reason": "Mismatch with tracked progress"}), 400
-
-# Get API status - deprecated duplicate; will be removed after transition
-@app.route('/api/leaderboard/status', methods=['GET'])
-def leaderboard_status():
-    # Returns API status
-    return jsonify({"status": "ok"}), 200
 
 # Get API status
 @app.route('/api/status', methods=['GET'])
@@ -1293,6 +1185,8 @@ def leaderboard():
             log_error('leaderboard_post', e, {'request_data': str(new_entry)})
             return jsonify({"error": str(e)}), 500
 
+    return jsonify({"error": "Method not allowed"}), 405
+
 # Get carrier pigeon inventory for session
 @app.route('/api/pigeon/inventory', methods=['GET'])
 def pigeon_inventory():
@@ -1303,6 +1197,7 @@ def pigeon_inventory():
     # Abuse flag check
     flagged, info = _is_flagged(request.remote_addr)
     if flagged:
+        info = info or {}
         _record_abuse('blocked_request', request.remote_addr, session_id)
         return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
     
@@ -1332,6 +1227,7 @@ def pigeon_purchase():
     
     flagged, info = _is_flagged(request.remote_addr)
     if flagged:
+        info = info or {}
         _record_abuse('blocked_request', request.remote_addr, session_id)
         return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
     
@@ -1381,6 +1277,7 @@ def pigeon_send():
 
     flagged, info = _is_flagged(request.remote_addr)
     if flagged:
+        info = info or {}
         _record_abuse('blocked_request', request.remote_addr, session_id)
         return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
 
@@ -1558,7 +1455,7 @@ def abuse_status():
 TURNSTILE_SECRET = os.environ.get("TURNSTILE_SECRET", "")
 
 # Verify Cloudflare Turnstile token
-def verify_turnstile(token: str, remote_ip: str = None) -> bool:
+def verify_turnstile(token: str, remote_ip: Optional[str] = None) -> bool:
     if not token or not TURNSTILE_SECRET:
         return False
     url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
@@ -1595,7 +1492,7 @@ def clean_html(val: str) -> str:
     return val
 
 # Recursively clean JSON data
-def clean_json(obj: any) -> any:
+def clean_json(obj: Any) -> Any:
     """
     Recursively clean JSON data structure by sanitizing 'name' fields.
     
