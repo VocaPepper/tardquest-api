@@ -169,7 +169,6 @@ The validator enforces these rules during `/api/update` calls:
 | **Level Regression** | Level cannot decrease on the same floor |
 | **EXP Regression** | EXP cannot decrease from current value |
 | **Floor Skips** | Can only advance 1 floor at a time (no jumping) |
-| **Level Jumps** | Can only advance 1 level at a time on same floor |
 | **EXP Validation** | Each level costs more EXP. Level N requires `(N-1)*N/2 * 10` total EXP (Level 1→2=10, Level 2→3=20, Level 3→4=30...) |
 | **Floor Speed Hack** | Minimum 10 seconds required between floor increments |
 | **Level-Up Spam** | Maximum 4 level-ups per 60 seconds (prevents `/giveexp` abuse) |
