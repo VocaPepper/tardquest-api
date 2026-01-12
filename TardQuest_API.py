@@ -44,7 +44,7 @@ session_ops_lock = Lock()
 # --- Application Configuration Constants ---
 # Major.Minor.Patch
 API_VERSION = "3.1.260111"
-MIN_CLIENT_VERSION = "3.0.251123" # Minimum supported client version
+MIN_CLIENT_VERSION = "3.0.251113" # Minimum supported client version
 # Server-Client check looks at Major.Minor only for compatibility, patch is numbered by date last edited in YYMMDD format.
 # Legacy endpoints ignore this check, as they are deprecated and will be removed in future versions.
 
