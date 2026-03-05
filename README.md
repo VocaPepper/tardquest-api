@@ -429,7 +429,7 @@ Edit `tardAPI.js` to set the API endpoint and client version:
 /** @const {string} Base URL for all API endpoints */
 const API_BASE = 'http://your-domain-or-ip:9601';
 
-/** @const {string} Client API version (major.minor must match server) */
+/** @const {string} Client API version (must match server minimum) */
 const CLIENT_API_VERSION = '3.2.YYMMDD';
 
 /** @const {string} LocalStorage key for session ID persistence */
