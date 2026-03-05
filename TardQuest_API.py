@@ -1,9 +1,9 @@
-# Import necessary modules
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from typing import Any, Dict, List, Tuple, Optional
+from werkzeug.middleware.proxy_fix import ProxyFix
+from typing import Any, Dict, List, Tuple, Optional, cast
 import json
 import os
 import uuid
@@ -17,33 +17,83 @@ import sqlite3
 import threading
 import time
 import traceback
+import logging
+from logging.handlers import RotatingFileHandler
 from threading import Lock
 
 # Import VocaGuard anti-cheat module
-from vocaguard import validator as vocaguard_validator, VocaGuardValidator
+from vocaguard import validator as vocaguard_validator
 
-# Load environment variables from .env file
 load_dotenv()
 
-# Initialize Flask application
 app = Flask(__name__)
+# Trust X-Forwarded-For from reverse proxy (1 proxy hop)
+# This ensures request.remote_addr reflects the real client IP
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 # Enable CORS for specified origins to allow cross-origin requests
 CORS(app, origins=["http://localhost:5500", "http://localhost:9599", "https://vocapepper.com", "https://milklounge.wang", "https://uploads.ungrounded.net"])
 # 5500: Used for local development, change as needed
 # 9599: Used for Electron app in production
 
+# --- Directory Layout ---
+# JSON state/config files live under json/
+_json_dir = os.path.join(os.path.dirname(__file__), 'json')
+os.makedirs(_json_dir, exist_ok=True)
+
+# --- Unified Logging Setup ---
+# All logs are written under the logs/ directory using RotatingFileHandler.
+# Format: plain-text .log files for easy tailing, grepping, and rotation.
+_log_dir = os.path.join(os.path.dirname(__file__), 'logs')
+os.makedirs(_log_dir, exist_ok=True)
+
+def _make_logger(name: str, filename: str, max_bytes: int = 10 * 1024 * 1024, backup_count: int = 5) -> logging.Logger:
+    """Create a named rotating file logger under logs/."""
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    handler = RotatingFileHandler(
+        os.path.join(_log_dir, filename),
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding='utf-8'
+    )
+    handler.setFormatter(logging.Formatter('%(message)s'))
+    logger.addHandler(handler)
+    return logger
+
+# Access log: logs/access.log  — every HTTP request
+access_logger = _make_logger('access', 'access.log')
+# VocaGuard / abuse log: logs/vocaguard.log  — abuse events, rejections
+vocaguard_logger = _make_logger('vocaguard', 'vocaguard.log')
+# Error log: logs/error.log  — server errors with tracebacks
+error_logger = _make_logger('error', 'error.log')
+
+@app.after_request
+def log_request(response):
+    """Log every request with the real client IP from X-Forwarded-For."""
+    access_logger.info(
+        '%s %s %s %s %s %d %s',
+        datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+        request.remote_addr,
+        request.method,
+        request.path,
+        request.headers.get('User-Agent', '-'),
+        response.status_code,
+        request.headers.get('Referer', '-')
+    )
+    return response
+
 # --- Thread Safety ---
-# Locks for concurrent access to JSON log files
-vocaguard_log_lock = Lock()
-general_log_lock = Lock()
+# Locks for concurrent access to state files and session operations
 flagged_ips_lock = Lock()
 whitelist_lock = Lock()
+launcher_manifest_lock = Lock()
 # Per-session lock to prevent race conditions on concurrent updates
 session_ops_lock = Lock()
 
 # --- Application Configuration Constants ---
 # Major.Minor.Patch
-API_VERSION = "3.1.260111"
+API_VERSION = "3.2.260304"
 MIN_CLIENT_VERSION = "3.0.251113" # Minimum supported client version
 # Server-Client check looks at Major.Minor only for compatibility, patch is numbered by date last edited in YYMMDD format.
 # Legacy endpoints ignore this check, as they are deprecated and will be removed in future versions.
@@ -60,10 +110,41 @@ SESSION_PURGE_AGE_DAYS = 7
 BACKGROUND_WORKER_SLEEP_SECONDS = 24 * 60 * 60  # 24 hours
 # Maximum leaderboard name length
 MAX_LEADERBOARD_NAME_LENGTH = 5
+# Developer API key for launcher manifest updates
+MANIFESTO_API_KEY = os.getenv('MANIFESTO_API_KEY', '').strip()
 
 # --- Anti-Cheat Configuration ---
 # Enable/disable VocaGuard anti-cheat validation on progress updates
 ENABLE_VOCAGUARD = os.getenv('ENABLE_VOCAGUARD', 'true').lower() in ('true', '1', 'yes')
+
+# --- Session Configuration ---
+SESSION_TIMEOUT_MINUTES = 120  # 2 hours (resets on vocaguard update)
+
+# --- Pigeon Messaging Configuration ---
+ALLOWED_CHARS_PATTERN = re.compile(r"[^A-Za-z0-9 .,!?;:'\-_/()\[\]@#%&*+=$\\\"]+")
+MAX_PIGEON_MESSAGE_LEN = 420
+MAX_PIGEONS_PER_SESSION = 20       # hard cap beyond rate limit
+PIGEON_RATE_LIMIT = "20 per hour"  # purchase spam guard
+
+# Delivery prioritization weights
+FLOOR_PROXIMITY_RANGE = 2               # preferred ±2 floors
+PRIORITY_HIGH_FLOOR_WEIGHT = 0.05       # +5% weight per sender floor
+PRIORITY_VERIFIED_MULTIPLIER = 1.5      # 50% boost for verified senders
+AGE_BOOST_FULL_SECONDS = 600            # full age boost after 10 min
+AGE_BOOST_MAX = 0.5                     # up to +50% boost for older messages
+RANDOM_JITTER_MIN = 0.85                # randomness factor range
+RANDOM_JITTER_MAX = 1.15
+REPEAT_SENDER_PENALTY = 0.5             # de-prioritize same sender consecutively
+
+# --- Abuse Monitoring Thresholds ---
+ABUSE_EVENT_WINDOW_SECONDS = 3600  # 1 hour rolling window
+ABUSE_DUPLICATE_THRESHOLD = 2
+ABUSE_SANITIZE_REJECT_THRESHOLD = 2
+ABUSE_CAPTCHA_FAIL_THRESHOLD = 2
+ABUSE_FLAG_DURATION_SECONDS = 3600  # 1 hour ban
+
+# --- External Service Secrets ---
+TURNSTILE_SECRET = os.environ.get("TURNSTILE_SECRET", "")
 
 # --- SQLite setup ---
 # Single DB file for all data
@@ -154,9 +235,8 @@ def init_db():
 # Initialize DB
 init_db()
 
-# Session management helper functions
+# --- Session Management ---
 
-# Save a single session to database (atomic operation, thread-safe)
 def save_session(session_id: str, session: Dict[str, Any]) -> None:
     """
     Save a single session to database using atomic INSERT OR REPLACE.
@@ -172,7 +252,7 @@ def save_session(session_id: str, session: Dict[str, Any]) -> None:
         # Try to insert with created_via column
         try:
             cur.execute(
-                'INSERT OR REPLACE INTO sessions (session_id, floor, level, exp, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified, created_via) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                'INSERT OR REPLACE INTO sessions (session_id, floor, level, exp, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified, created_via) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (
                     session_id,
                     int(session.get('floor', 1)),
@@ -214,40 +294,7 @@ def save_session(session_id: str, session: Dict[str, Any]) -> None:
     except Exception as e:
         log_error('save_session', e, {'session_id': session_id})
 
-# Load pigeons from database
-
-# Save a single pigeon to database (atomic operation, thread-safe)
-def save_pigeon(pigeon: Dict[str, Any]) -> None:
-    """
-    Save a single pigeon message to database using atomic INSERT OR REPLACE.
-    
-    Args:
-        pigeon: Dictionary containing pigeon message data
-    """
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            'INSERT OR REPLACE INTO pigeons (id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (
-                pigeon.get('id') or str(uuid.uuid4()),
-                pigeon.get('text', ''),
-                pigeon.get('from_session', ''),
-                int(pigeon.get('from_floor', 0)),
-                int(pigeon.get('from_level', 0)),
-                1 if pigeon.get('from_verified') else 0,
-                pigeon.get('created', datetime.utcnow().isoformat()),
-                1 if pigeon.get('delivered') else 0,
-                pigeon.get('delivered_at'),
-                pigeon.get('delivered_to'),
-            )
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        log_error('save_pigeon', e, {'pigeon_id': pigeon.get('id')})
-
-# --- Optimized Per-Session Database Functions (No Full-Table Fetch) ---
+# --- Per-Session Database Functions ---
 
 def get_session_by_id(session_id: str) -> Optional[Dict]:
     """
@@ -465,8 +512,9 @@ def get_pending_pigeon_for_delivery(recipient_floor: int, recipient_session_id: 
                 'delivered_to': r[9],
             })
         
-        # Apply weighting logic (proximity, age, etc.)
-        weights = [_message_weight(p, {'floor': recipient_floor}, {}) for p in candidates]
+        # Apply weighting logic (proximity, age, repeat-sender penalty, etc.)
+        recipient_ctx = {'floor': recipient_floor, 'last_from_session_delivered': exclude_recent_sender}
+        weights = [_message_weight(p, recipient_ctx) for p in candidates]
         
         if sum(weights) <= 0:
             return candidates[0] if candidates else None
@@ -505,14 +553,13 @@ def mark_pigeon_delivered(pigeon_id: str, delivered_to_session: str) -> bool:
 
 def get_pending_pigeon_count(session_id: str) -> int:
     """
-    Get count of undelivered pigeons from a specific session.
-    Does NOT load full table.
+    Get count of undelivered pigeons sent BY a specific session (outbox count).
     
     Args:
-        session_id: The session identifier
+        session_id: The sender's session identifier
         
     Returns:
-        Count of pending pigeons
+        Count of pending outbound pigeons
     """
     try:
         conn = get_db_connection()
@@ -525,98 +572,78 @@ def get_pending_pigeon_count(session_id: str) -> int:
         log_error('get_pending_pigeon_count', e, {'session_id': session_id})
         return 0
 
-# Session timeout in minutes
-SESSION_TIMEOUT_MINUTES = 120 # 2 hours timeout for sessions (resets on vocaguard update)
-
-# Configuration for pigeon message sanitation
-
-# Regex pattern for allowed characters in messages
-ALLOWED_CHARS_PATTERN = re.compile(r"[^A-Za-z0-9 .,!?;:'\-_/()\[\]@#%&*+=$\\\"]+")
-
-# Maximum length for pigeon messages
-MAX_PIGEON_MESSAGE_LEN = 420
-# Maximum pigeons per session
-MAX_PIGEONS_PER_SESSION = 20  # hard cap beyond rate limit
-# Rate limit for pigeon purchases
-PIGEON_RATE_LIMIT = "20 per hour"  # purchase spam guard
-
-# Delivery prioritization config
-FLOOR_PROXIMITY_RANGE = 2               # preferred ±2 floors
-PRIORITY_HIGH_FLOOR_WEIGHT = 0.05       # +5% weight per sender floor
-PRIORITY_VERIFIED_MULTIPLIER = 1.5      # 50% boost for verified sender sessions
-AGE_BOOST_FULL_SECONDS = 600            # full age boost after 10 minutes
-AGE_BOOST_MAX = 0.5                     # up to +50% boost for older messages
-RANDOM_JITTER_MIN = 0.85                # randomness factor range
-RANDOM_JITTER_MAX = 1.15
-REPEAT_SENDER_PENALTY = 0.5             # de-prioritize same sender consecutively
-
-# Configuration for abuse monitoring
-
-# Time window for abuse events in seconds
-ABUSE_EVENT_WINDOW_SECONDS = 3600  # 1 hour rolling window
-# Threshold for duplicate attempts
-ABUSE_DUPLICATE_THRESHOLD = 2
-# Threshold for sanitize rejections
-ABUSE_SANITIZE_REJECT_THRESHOLD = 2
-# Threshold for captcha failures
-ABUSE_CAPTCHA_FAIL_THRESHOLD = 2
-# Duration for abuse flag (ban) in seconds
-ABUSE_FLAG_DURATION_SECONDS = 3600  # 1 hour flag
+def get_deliverable_pigeon_count(session_id: str) -> int:
+    """
+    Get count of undelivered pigeons available FOR delivery to a session
+    (i.e. not sent by this session).
+    
+    Args:
+        session_id: The recipient's session identifier
+        
+    Returns:
+        Count of pigeons available for delivery
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM pigeons WHERE delivered = 0 AND from_session != ?', (session_id,))
+        count = cur.fetchone()[0]
+        conn.close()
+        return count
+    except Exception as e:
+        log_error('get_deliverable_pigeon_count', e, {'session_id': session_id})
+        return 0
 
 # --- Helper Functions for API Responses ---
 
-# Log to vocaguard.json for VocaGuard-related errors and rejections
-def log_to_vocaguard_json(event: Dict) -> None:
+def _is_session_expired(session: Dict) -> bool:
+    """Check whether a session's 'expires' timestamp is in the past.
+
+    Returns True (expired) when the value is missing, malformed, or past-due,
+    so callers never need to catch ValueError themselves.
     """
-    Log an abuse/VocaGuard event to vocaguard.json with thread-safe file locking.
+    try:
+        return datetime.fromisoformat(session['expires']) < datetime.utcnow()
+    except (ValueError, KeyError, TypeError):
+        return True
+
+# VocaGuard / abuse event log — logs/vocaguard.log
+# Line format: TIMESTAMP|IP|METRIC|sid=...|key=value ...
+def log_vocaguard_event(event: Dict) -> None:
+    """
+    Append an abuse/VocaGuard event line to logs/vocaguard.log.
+    Thread-safe via RotatingFileHandler internal locking.
     
     Args:
         event: Dictionary containing event data (ts, ip, metric, etc.)
     """
-    vocaguard_log_file = os.path.join(os.path.dirname(__file__), "vocaguard.json")
     try:
-        with vocaguard_log_lock:
-            # Load existing logs or start fresh
-            logs = []
-            if os.path.exists(vocaguard_log_file):
-                with open(vocaguard_log_file, 'r') as f:
-                    logs = json.load(f)
-            # Append new event
-            logs.append(event)
-            # Write back
-            with open(vocaguard_log_file, 'w') as f:
-                json.dump(logs, f, indent=2)
+        ts = datetime.utcfromtimestamp(event.get('ts', int(datetime.utcnow().timestamp()))).strftime('%Y-%m-%d %H:%M:%S')
+        ip = event.get('ip', 'unknown')
+        metric = event.get('metric', 'unknown')
+        parts = [ts, ip, metric]
+        # Append optional structured fields
+        if event.get('sid'):
+            parts.append(f"sid={event['sid']}")
+        if event.get('reason'):
+            parts.append(f"reason={event['reason']}")
+        if event.get('ua'):
+            parts.append(f"ua={event['ua']}")
+        if event.get('extra'):
+            for k, v in event['extra'].items():
+                parts.append(f"{k}={v}")
+        if event.get('data_excerpt'):
+            for k, v in event['data_excerpt'].items():
+                if v is not None:
+                    parts.append(f"{k}={v}")
+        vocaguard_logger.info('|'.join(str(p) for p in parts))
     except Exception as e:
         print(f"VOCAGUARD LOG ERROR: {e}")
 
-# Log to log.json for general server errors
-def log_to_general_json(event: Dict) -> None:
-    """
-    Log a general server error to log.json with thread-safe file locking.
-    
-    Args:
-        event: Dictionary containing error event data (error, traceback, etc.)
-    """
-    log_file = os.path.join(os.path.dirname(__file__), "log.json")
-    try:
-        with general_log_lock:
-            # Load existing logs or start fresh
-            logs = []
-            if os.path.exists(log_file):
-                with open(log_file, 'r') as f:
-                    logs = json.load(f)
-            # Append new event
-            logs.append(event)
-            # Write back
-            with open(log_file, 'w') as f:
-                json.dump(logs, f, indent=2)
-    except Exception as e:
-        print(f"GENERAL LOG ERROR: {e}")
-
-# Log an error to log.json with context
+# Error log — logs/error.log
 def log_error(function_name: str, error: Exception, context: Optional[Dict] = None) -> None:
     """
-    Log an error with full stack trace and context to log.json.
+    Log an error with stack trace and context to logs/error.log.
     
     Args:
         function_name: Name of the function where error occurred
@@ -624,49 +651,66 @@ def log_error(function_name: str, error: Exception, context: Optional[Dict] = No
         context: Optional dictionary with contextual data (counts, session info, etc.)
     """
     try:
-        error_event = {
-            'ts': int(datetime.utcnow().timestamp()),
-            'function': function_name,
-            'error': str(error),
-            'error_type': type(error).__name__,
-            'traceback': traceback.format_exc()
-        }
+        ts = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        tb = traceback.format_exc().replace('\n', '\\n')  # flatten for single-line log
+        ctx = ''
         if context:
-            error_event['context'] = context
-        log_to_general_json(error_event)
+            ctx = ' ' + ' '.join(f'{k}={v}' for k, v in context.items())
+        error_logger.info(
+            '%s|%s|%s|%s|%s%s',
+            ts, function_name, type(error).__name__, str(error), tb, ctx
+        )
     except Exception as e:
         print(f"LOG ERROR FAILED: {e}")
 
 def _load_vocaguard_events() -> List[Dict]:
     """
-    Load recent vocaguard events within the time window from vocaguard.json.
+    Load recent vocaguard events within the time window from logs/vocaguard.log.
+    Parses pipe-delimited log lines back into dicts for abuse threshold checks.
     
     Returns:
         List of event dictionaries from the past ABUSE_EVENT_WINDOW_SECONDS
     """
-    vocaguard_log_file = os.path.join(os.path.dirname(__file__), "vocaguard.json")
+    vocaguard_log_file = os.path.join(_log_dir, 'vocaguard.log')
     events = []
-    if os.path.exists(vocaguard_log_file):
-        try:
-            with open(vocaguard_log_file, 'r') as f:
-                all_events = json.load(f)
-            now_ts = int(datetime.utcnow().timestamp())
-            cutoff = now_ts - ABUSE_EVENT_WINDOW_SECONDS
-            # Filter events within the time window
-            events = [e for e in all_events if e.get('ts', 0) >= cutoff]
-        except Exception as e:
-            log_error('load_vocaguard_events', e)
+    if not os.path.exists(vocaguard_log_file):
+        return events
+    try:
+        now_ts = int(datetime.utcnow().timestamp())
+        cutoff = now_ts - ABUSE_EVENT_WINDOW_SECONDS
+        with open(vocaguard_log_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split('|')
+                if len(parts) < 3:
+                    continue
+                try:
+                    ts = int(datetime.strptime(parts[0], '%Y-%m-%d %H:%M:%S').timestamp())
+                except (ValueError, IndexError):
+                    continue
+                if ts < cutoff:
+                    continue
+                event: Dict[str, Any] = {'ts': ts, 'ip': parts[1], 'metric': parts[2]}
+                # Parse remaining key=value fields
+                for part in parts[3:]:
+                    if '=' in part:
+                        k, _, v = part.partition('=')
+                        event[k] = v
+                events.append(event)
+    except Exception as e:
+        log_error('load_vocaguard_events', e)
     return events
 
-# Load flagged IPs from flagged.json
 def _load_flagged_ips() -> Dict[str, Dict]:
     """
-    Load flagged (banned) IPs from flagged.json with thread-safe file locking.
+    Load flagged (banned) IPs from json/flagged.json with thread-safe file locking.
     
     Returns:
         Dictionary mapping IP addresses to their flag information (expiry, counts)
     """
-    flagged_file = os.path.join(os.path.dirname(__file__), "flagged.json")
+    flagged_file = os.path.join(_json_dir, 'flagged.json')
     flagged = {}
     try:
         with flagged_ips_lock:
@@ -677,15 +721,14 @@ def _load_flagged_ips() -> Dict[str, Dict]:
         log_error('load_flagged_ips', e)
     return flagged
 
-# Save flagged IPs to flagged.json
 def _save_flagged_ips(flagged: Dict[str, Dict]) -> None:
     """
-    Save flagged IPs dictionary to flagged.json with thread-safe file locking.
+    Save flagged IPs dictionary to json/flagged.json with thread-safe file locking.
     
     Args:
         flagged: Dictionary mapping IPs to flag information
     """
-    flagged_file = os.path.join(os.path.dirname(__file__), "flagged.json")
+    flagged_file = os.path.join(_json_dir, 'flagged.json')
     try:
         with flagged_ips_lock:
             with open(flagged_file, 'w') as f:
@@ -693,15 +736,14 @@ def _save_flagged_ips(flagged: Dict[str, Dict]) -> None:
     except Exception as e:
         log_error('save_flagged_ips', e)
 
-# Load whitelisted IPs from whitelist.json
 def _load_whitelist() -> List[str]:
     """
-    Load admin whitelisted IPs from whitelist.json with thread-safe file locking.
+    Load admin whitelisted IPs from json/whitelist.json with thread-safe file locking.
     
     Returns:
         List of whitelisted IP address strings
     """
-    whitelist_file = os.path.join(os.path.dirname(__file__), "whitelist.json")
+    whitelist_file = os.path.join(_json_dir, 'whitelist.json')
     whitelist = []
     try:
         with whitelist_lock:
@@ -717,23 +759,6 @@ def _load_whitelist() -> List[str]:
         log_error('load_whitelist', e)
     return whitelist
 
-# Save whitelisted IPs to whitelist.json
-def _save_whitelist(whitelist: List[str]) -> None:
-    """
-    Save whitelisted IPs list to whitelist.json with thread-safe file locking.
-    
-    Args:
-        whitelist: List of IP address strings to whitelist
-    """
-    whitelist_file = os.path.join(os.path.dirname(__file__), "whitelist.json")
-    try:
-        with whitelist_lock:
-            with open(whitelist_file, 'w') as f:
-                json.dump({'ips': whitelist, 'updated': datetime.utcnow().isoformat()}, f, indent=2)
-    except Exception as e:
-        log_error('save_whitelist', e)
-
-# Check if an IP is whitelisted
 def _is_ip_whitelisted(ip: Optional[str]) -> bool:
     """
     Check if an IP address is in the whitelist.
@@ -749,7 +774,6 @@ def _is_ip_whitelisted(ip: Optional[str]) -> bool:
     whitelist = _load_whitelist()
     return str(ip) in whitelist
 
-# Record an abuse event
 def _record_abuse(metric: str, ip: Optional[str], session_id: Optional[str] = None, extra: Optional[Dict] = None) -> None:
     """
     Record an abuse event and evaluate if IP should be flagged.
@@ -762,9 +786,9 @@ def _record_abuse(metric: str, ip: Optional[str], session_id: Optional[str] = No
     """
     try:
         now_ts = int(datetime.utcnow().timestamp())
-        # Create event for vocaguard.json logging
+        # Create event for vocaguard log
         safe_ip = ip or "unknown"
-        event = {
+        event: Dict[str, Any] = {
             'ts': now_ts,
             'ip': safe_ip,
             'metric': metric
@@ -775,10 +799,10 @@ def _record_abuse(metric: str, ip: Optional[str], session_id: Optional[str] = No
             # avoid storing sensitive raw data
             safe_extra = {k: (v if k != 'raw' else None) for k, v in extra.items()}
             event['extra'] = safe_extra
-        # Log to vocaguard.json
-        log_to_vocaguard_json(event)
+        # Log to logs/vocaguard.log
+        log_vocaguard_event(event)
         
-        # Count recent abuse events from vocaguard.json to determine flagging
+        # Count recent abuse events from vocaguard log to determine flagging
         recent_events = _load_vocaguard_events()
         ip_events = [e for e in recent_events if e.get('ip') == safe_ip]
         
@@ -796,7 +820,7 @@ def _record_abuse(metric: str, ip: Optional[str], session_id: Optional[str] = No
         )
         
         if should_flag:
-            # Update flagged IPs in flagged.json
+            # Update flagged IPs in json/flagged.json
             flagged = _load_flagged_ips()
             flagged[safe_ip] = {
                 'until': int(now_ts + ABUSE_FLAG_DURATION_SECONDS),
@@ -807,7 +831,6 @@ def _record_abuse(metric: str, ip: Optional[str], session_id: Optional[str] = No
         # Fail open; do not break main flow
         log_error('record_abuse', e)
 
-# Check if an IP is flagged for abuse
 def _is_flagged(ip: Optional[str]) -> Tuple[bool, Optional[Dict]]:
     """
     Check if an IP is currently flagged for abuse, with auto-expiration of old flags.
@@ -840,8 +863,8 @@ def _is_flagged(ip: Optional[str]) -> Tuple[bool, Optional[Dict]]:
         log_error('is_flagged_unexpected', e)
         return False, None
 
-# Sanitize pigeon message content
 def sanitize_pigeon_message(raw: str) -> str:
+    """Sanitize pigeon message: normalize unicode, strip HTML, filter characters, enforce length."""
     if not isinstance(raw, str):
         return ""
     # Normalize unicode (NFC)
@@ -866,7 +889,17 @@ def sanitize_pigeon_message(raw: str) -> str:
         return ""
     return txt
 
-# Initialize rate limiter
+
+def parse_version(version_str: str) -> Optional[Tuple[int, int, int]]:
+    """Parse a 'major.minor.patch' version string into a comparable tuple."""
+    try:
+        parts = version_str.split('.')
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except (IndexError, ValueError):
+        return None
+
+
+# --- Rate Limiting ---
 limiter = Limiter(
     get_remote_address,
     app=app,
@@ -875,7 +908,7 @@ limiter = Limiter(
 
 # API Endpoints
 
-# Start a new session - new endpoint separate from vocaguard/start
+# Start a new session
 @app.route('/api/start', methods=['POST'])
 def tardquest_start():
     # Starts a new session and returns session_id
@@ -889,15 +922,6 @@ def tardquest_start():
             "server_version": API_VERSION,
             "reason": "Missing 'version' field in request"
         }), 400
-    
-    # Check version compatibility: require major.minor match server and not below MIN_CLIENT_VERSION
-    def parse_version(version_str: str) -> Optional[Tuple[int, int, int]]:
-        """Parse version string into (major, minor, patch) tuple"""
-        try:
-            parts = version_str.split('.')
-            return (int(parts[0]), int(parts[1]), int(parts[2]))
-        except (IndexError, ValueError):
-            return None
     
     client_version_tuple = parse_version(client_version)
     server_version_tuple = parse_version(API_VERSION)
@@ -925,7 +949,6 @@ def tardquest_start():
     session_id = str(uuid.uuid4())
     expires = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
     
-    # Use save_session (atomic) instead of load_sessions/save_sessions pattern
     new_session = {
         "session_id": session_id,
         "floor": 1,
@@ -984,7 +1007,7 @@ def vocaguard_update():
         return jsonify({"error": "Invalid session token"}), 400
     
     # Check expiration
-    if datetime.fromisoformat(session['expires']) < datetime.utcnow():
+    if _is_session_expired(session):
         _record_abuse('session_expired', request.remote_addr, session_id)
         delete_session(session_id)
         return jsonify({"error": "Session expired"}), 400
@@ -1040,6 +1063,78 @@ def api_status():
     # Returns API status
     return jsonify({"status": "ok", "version": API_VERSION}), 200
 
+@app.route('/api/launcher-win64', methods=['GET', 'POST'])
+def launcher_win64():
+    try:
+        if request.method == 'GET':
+            manifest = _load_launcher_manifest()
+            if manifest is None:
+                return jsonify({"error": "launcher-win64.json not found"}), 404
+            return jsonify(manifest), 200
+
+        provided_key = _extract_launcher_api_key(request)
+        if not MANIFESTO_API_KEY:
+            return jsonify({"error": "Launcher manifest update API key is not configured"}), 503
+        if not provided_key or provided_key != MANIFESTO_API_KEY:
+            _record_abuse('launcher_manifest_auth_fail', request.remote_addr)
+            return jsonify({"error": "Unauthorized"}), 401
+
+        payload = request.get_json(silent=True) or {}
+        operation = str(payload.get('operation') or 'upsert_version').strip()
+
+        if operation == 'replace_manifest':
+            manifest = payload.get('manifest')
+            valid, error_message = _validate_launcher_manifest(manifest)
+            if not valid:
+                return jsonify({"error": error_message}), 400
+            if not isinstance(manifest, dict):
+                return jsonify({"error": "manifest must be an object"}), 400
+            _save_launcher_manifest(cast(Dict[str, Any], manifest))
+            return jsonify({"status": "updated", "operation": "replace_manifest"}), 200
+
+        if operation != 'upsert_version':
+            return jsonify({"error": "Unsupported operation. Use 'upsert_version' or 'replace_manifest'"}), 400
+
+        brand = payload.get('brand')
+        version_entry = payload.get('version_entry')
+        if not isinstance(brand, str) or not brand.strip():
+            return jsonify({"error": "brand is required and must be a non-empty string"}), 400
+
+        valid, error_message = _validate_launcher_version_entry(version_entry)
+        if not valid:
+            return jsonify({"error": error_message}), 400
+        if not isinstance(version_entry, dict):
+            return jsonify({"error": "version_entry must be an object"}), 400
+
+        version_entry_dict = cast(Dict[str, Any], version_entry)
+        updated_manifest, action = _upsert_launcher_win64_version(brand.strip(), version_entry_dict)
+        return jsonify({
+            "status": "updated",
+            "operation": "upsert_version",
+            "brand": brand.strip(),
+            "version": version_entry_dict.get('version'),
+            "action": action,
+            "brands": len((updated_manifest or {}).get('brands', {}))
+        }), 200
+    except Exception as e:
+        log_error('launcher_win64', e)
+        return jsonify({"error": "Failed to load launcher-win64.json"}), 500
+    
+@app.route('/api/launcher-linux', methods=['GET'])
+def launcher_linux():
+    try:
+        launcher_file = os.path.join(_json_dir, 'launcher-linux.json')
+        if not os.path.exists(launcher_file):
+            return jsonify({"error": "launcher-linux.json not found"}), 404
+
+        with open(launcher_file, 'r', encoding='utf-8') as file:
+            data = json.load(file)
+
+        return jsonify(data), 200
+    except Exception as e:
+        log_error('launcher_linux', e)
+        return jsonify({"error": "Failed to load launcher-linux.json"}), 500    
+
 # Handle leaderboard GET and POST requests
 @app.route('/api/leaderboard', methods=['GET', 'POST'])
 def leaderboard():
@@ -1086,8 +1181,6 @@ def leaderboard():
                 _record_abuse('captcha_fail', request.remote_addr, new_entry.get('session_id'),
                              {'reason': 'captcha_verification_failed'})
                 return jsonify({"error": "Captcha verification failed"}), 400
-            raw_name = new_entry['name']
-            filtered_name = re.sub(r'<.*?>', '', raw_name).strip()
             new_entry['name'] = clean_html(new_entry['name'])
             filtered_name = new_entry['name']
             if not filtered_name:
@@ -1118,7 +1211,7 @@ def leaderboard():
                     _record_abuse('invalid_session', request.remote_addr, new_entry.get('session_id'))
                     return jsonify({"error": "VocaGuard session missing or invalid"}), 400
                 
-                if datetime.fromisoformat(session['expires']) < datetime.utcnow():
+                if _is_session_expired(session):
                     log_rejection("VocaGuard session expired", new_entry)
                     _record_abuse('session_expired', request.remote_addr, new_entry.get('session_id'))
                     delete_session(new_entry['session_id'])
@@ -1207,7 +1300,7 @@ def pigeon_inventory():
         _record_abuse('invalid_session', request.remote_addr, session_id)
         return jsonify({"error": "Invalid session"}), 400
     
-    if datetime.fromisoformat(session["expires"]) < datetime.utcnow():
+    if _is_session_expired(session):
         _record_abuse('session_expired', request.remote_addr, session_id)
         delete_session(session_id)
         return jsonify({"error": "Session expired"}), 400
@@ -1237,7 +1330,7 @@ def pigeon_purchase():
         _record_abuse('invalid_session', request.remote_addr, session_id)
         return jsonify({"error": "Invalid session"}), 400
     
-    if datetime.fromisoformat(session["expires"]) < datetime.utcnow():
+    if _is_session_expired(session):
         _record_abuse('session_expired', request.remote_addr, session_id)
         delete_session(session_id)
         return jsonify({"error": "Session expired"}), 400
@@ -1287,7 +1380,7 @@ def pigeon_send():
         _record_abuse('invalid_session', request.remote_addr, session_id)
         return jsonify({"error": "Invalid session"}), 400
     
-    if datetime.fromisoformat(session["expires"]) < datetime.utcnow():
+    if _is_session_expired(session):
         _record_abuse('session_expired', request.remote_addr, session_id)
         delete_session(session_id)
         return jsonify({"error": "Session expired"}), 400
@@ -1380,7 +1473,7 @@ def pigeon_delivery():
         _record_abuse('invalid_session', request.remote_addr, session_id)
         return jsonify({"error": "Invalid session"}), 400
     
-    if datetime.fromisoformat(session["expires"]) < datetime.utcnow():
+    if _is_session_expired(session):
         _record_abuse('session_expired', request.remote_addr, session_id)
         delete_session(session_id)
         return jsonify({"error": "Session expired"}), 400
@@ -1402,21 +1495,14 @@ def pigeon_delivery():
             'last_from_session_delivered': delivered_msg.get('from_session')
         })
     
-    # Count pending pigeons (targeted COUNT query)
-    pending = get_pending_pigeon_count(session_id)
-    
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('SELECT COUNT(*) FROM pigeons')
-    total = cur.fetchone()[0]
-    conn.close()
+    # Count pigeons still available for this recipient
+    pending = get_deliverable_pigeon_count(session_id)
 
     return jsonify({
         "delivered": bool(delivered_msg),
         "pigeon_message": delivered_msg["text"] if delivered_msg else None,
         "pigeon_id": delivered_msg["id"] if delivered_msg else None,
-        "remaining_queue_pending": pending,
-        "remaining_queue_total": total
+        "remaining_queue_pending": pending
     }), 200
 
 # Get abuse status (whitelisted IPs only)
@@ -1428,10 +1514,10 @@ def abuse_status():
         return jsonify({"error": "Unauthorized"}), 403
     
     try:
-        # Load flagged IPs from flagged.json
+        # Load flagged IPs from json/flagged.json
         flagged = _load_flagged_ips()
         
-        # Get aggregated counts from vocaguard.json
+        # Get aggregated counts from logs/vocaguard.log
         recent_events = _load_vocaguard_events()
         agg = {}
         for e in recent_events:
@@ -1439,23 +1525,28 @@ def abuse_status():
             metric = e.get('metric')
             agg.setdefault(ip, {})[metric] = agg.setdefault(ip, {}).get(metric, 0) + 1
         
+        # Gather behavioral fingerprint scores for active sessions
+        behavior_scores = {}
+        query_session = request.args.get('session_id')
+        if query_session:
+            score, details = vocaguard_validator.get_behavior_score(query_session)
+            behavior_scores[query_session] = {'score': score, **details}
+
         return jsonify({
             'flagged': flagged,
             'counts': agg,
             'window_seconds': ABUSE_EVENT_WINDOW_SECONDS,
-            'vocaguard_events': recent_events
+            'vocaguard_events': recent_events,
+            'behavior': behavior_scores
         })
     except Exception as e:
         log_error('abuse_status', e)
         return jsonify({"error": str(e)}), 500
 
-# Utility Functions
+# --- Utility Functions ---
 
-# Get Turnstile secret from environment
-TURNSTILE_SECRET = os.environ.get("TURNSTILE_SECRET", "")
-
-# Verify Cloudflare Turnstile token
 def verify_turnstile(token: str, remote_ip: Optional[str] = None) -> bool:
+    """Verify a Cloudflare Turnstile captcha token via their API."""
     if not token or not TURNSTILE_SECRET:
         return False
     url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
@@ -1467,10 +1558,135 @@ def verify_turnstile(token: str, remote_ip: Optional[str] = None) -> bool:
         result = resp.json()
         return bool(result.get("success"))
     except Exception as e:
-        print(f"Turnstile verification error: {e}")
+        log_error('verify_turnstile', e)
         return False
 
-# Clean HTML and scripts from string, enforce max length limit
+def _extract_launcher_api_key(req) -> str:
+    """
+    Extract launcher manifest API key from headers.
+
+    Supported headers:
+    - X-API-Key: <key>
+    - Authorization: Bearer <key>
+    """
+    key = (req.headers.get('X-API-Key') or '').strip()
+    if key:
+        return key
+    auth = (req.headers.get('Authorization') or '').strip()
+    if auth.lower().startswith('bearer '):
+        return auth[7:].strip()
+    return ""
+
+def _launcher_manifest_path() -> str:
+    return os.path.join(_json_dir, 'launcher-win64.json')
+
+def _load_launcher_manifest() -> Optional[Dict[str, Any]]:
+    """Load launcher-win64.json safely."""
+    launcher_file = _launcher_manifest_path()
+    if not os.path.exists(launcher_file):
+        return None
+    with launcher_manifest_lock:
+        with open(launcher_file, 'r', encoding='utf-8') as file:
+            return json.load(file)
+
+def _save_launcher_manifest(manifest: Dict[str, Any]) -> None:
+    """Save launcher-win64.json atomically to avoid partial writes."""
+    launcher_file = _launcher_manifest_path()
+    temp_file = f"{launcher_file}.tmp"
+    with launcher_manifest_lock:
+        with open(temp_file, 'w', encoding='utf-8') as file:
+            json.dump(manifest, file, indent=2)
+            file.write('\n')
+        os.replace(temp_file, launcher_file)
+
+def _validate_launcher_manifest(manifest: Any) -> Tuple[bool, Optional[str]]:
+    """Validate minimal launcher manifest structure."""
+    if not isinstance(manifest, dict):
+        return False, "manifest must be an object"
+    brands = manifest.get('brands')
+    if not isinstance(brands, dict):
+        return False, "manifest.brands must be an object"
+
+    for brand_name, brand_data in brands.items():
+        if not isinstance(brand_name, str) or not brand_name.strip():
+            return False, "Each brand name must be a non-empty string"
+        if not isinstance(brand_data, dict):
+            return False, f"Brand '{brand_name}' must be an object"
+        versions = brand_data.get('versions')
+        if not isinstance(versions, list):
+            return False, f"Brand '{brand_name}' must contain a versions array"
+        for entry in versions:
+            valid, err = _validate_launcher_version_entry(entry)
+            if not valid:
+                return False, f"Brand '{brand_name}' has invalid version entry: {err}"
+
+    return True, None
+
+def _validate_launcher_version_entry(entry: Any) -> Tuple[bool, Optional[str]]:
+    """Validate a single launcher version entry payload."""
+    if not isinstance(entry, dict):
+        return False, "version_entry must be an object"
+
+    required_fields = ['version', 'file_name', 'download_url', 'sha256', 'size', 'release_notes']
+    for field in required_fields:
+        if field not in entry:
+            return False, f"version_entry is missing required field '{field}'"
+
+    if not isinstance(entry['version'], str) or not entry['version'].strip():
+        return False, "version_entry.version must be a non-empty string"
+    if not isinstance(entry['file_name'], str) or not entry['file_name'].strip():
+        return False, "version_entry.file_name must be a non-empty string"
+    if not isinstance(entry['download_url'], str) or not re.match(r'^https?://', entry['download_url']):
+        return False, "version_entry.download_url must be a valid http(s) URL"
+    if not isinstance(entry['sha256'], str) or not re.fullmatch(r'[A-Fa-f0-9]{64}', entry['sha256']):
+        return False, "version_entry.sha256 must be a 64-character hex string"
+    if not isinstance(entry['size'], int) or entry['size'] < 0:
+        return False, "version_entry.size must be a non-negative integer"
+    if not isinstance(entry['release_notes'], str):
+        return False, "version_entry.release_notes must be a string"
+
+    return True, None
+
+def _upsert_launcher_win64_version(brand: str, version_entry: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    """Insert or replace a version entry for a brand in launcher-win64 manifest."""
+    launcher_file = _launcher_manifest_path()
+    temp_file = f"{launcher_file}.tmp"
+
+    with launcher_manifest_lock:
+        if os.path.exists(launcher_file):
+            with open(launcher_file, 'r', encoding='utf-8') as file:
+                manifest = json.load(file)
+        else:
+            manifest = {'brands': {}}
+
+        if 'brands' not in manifest or not isinstance(manifest['brands'], dict):
+            manifest['brands'] = {}
+
+        if brand not in manifest['brands'] or not isinstance(manifest['brands'].get(brand), dict):
+            manifest['brands'][brand] = {'versions': []}
+
+        versions = manifest['brands'][brand].get('versions')
+        if not isinstance(versions, list):
+            versions = []
+            manifest['brands'][brand]['versions'] = versions
+
+        action = 'created'
+        target_version = version_entry.get('version')
+        for idx, existing in enumerate(versions):
+            if isinstance(existing, dict) and existing.get('version') == target_version:
+                versions[idx] = version_entry
+                action = 'updated'
+                break
+        else:
+            versions.append(version_entry)
+
+        with open(temp_file, 'w', encoding='utf-8') as file:
+            json.dump(manifest, file, indent=2)
+            file.write('\n')
+        os.replace(temp_file, launcher_file)
+
+    return manifest, action
+
 def clean_html(val: str) -> str:
     """
     Clean HTML/script tags and dangerous content from string.
@@ -1481,7 +1697,6 @@ def clean_html(val: str) -> str:
     Returns:
         Cleaned string limited to MAX_LEADERBOARD_NAME_LENGTH, alphanumeric + spaces only
     """
-    # Cleans HTML/script from string and enforces MAX_LEADERBOARD_NAME_LENGTH limit
     if isinstance(val, str):
         val = re.sub(r'<.*?>', '', val)
         val = re.sub(r'(script|meta|iframe|onerror|onload|javascript:|http-equiv|src|href|alert|document|window)', '', val, flags=re.IGNORECASE)
@@ -1491,7 +1706,6 @@ def clean_html(val: str) -> str:
         return val
     return val
 
-# Recursively clean JSON data
 def clean_json(obj: Any) -> Any:
     """
     Recursively clean JSON data structure by sanitizing 'name' fields.
@@ -1502,7 +1716,6 @@ def clean_json(obj: Any) -> Any:
     Returns:
         Cleaned JSON object with same structure
     """
-    # Recursively clean leaderboard JSON
     if isinstance(obj, dict):
         return {k: clean_html(v) if k == 'name' else clean_json(v) for k, v in obj.items()}
     elif isinstance(obj, list):
@@ -1510,12 +1723,11 @@ def clean_json(obj: Any) -> Any:
     else:
         return obj
 
-# Log rejection reason to vocaguard.json
 def log_rejection(reason: str, data: Optional[Dict]) -> None:
-    # Append rejection event to vocaguard.json
+    """Log a leaderboard submission rejection to vocaguard.log."""
     try:
         now_ts = int(datetime.utcnow().timestamp())
-        event = {
+        event: Dict[str, Any] = {
             'ts': now_ts,
             'ip': request.remote_addr,
             'metric': 'rejection',
@@ -1527,44 +1739,35 @@ def log_rejection(reason: str, data: Optional[Dict]) -> None:
                 'level': (data.get('level') if isinstance(data, dict) else None)
             }
         }
-        log_to_vocaguard_json(event)
+        log_vocaguard_event(event)
     except Exception as e:
         # Fail open; rejection logging failure should not block main flow
         pass
 
-# Ensure session has inventory structure
-def _ensure_inventory(session: dict):
+def _ensure_inventory(session: dict) -> dict:
+    """Ensure a session dict has the expected inventory structure."""
     if 'inv' not in session or not isinstance(session['inv'], dict):
         session['inv'] = {}
     if 'carrierPigeon' not in session['inv']:
         session['inv']['carrierPigeon'] = 0
     return session
 
-# Resolve sender progress/verification for a message, using captured fields if present
-def _sender_progress_for_msg(msg: dict, sessions: dict):
-    from_floor = msg.get("from_floor")
-    from_level = msg.get("from_level")
-    from_verified = msg.get("from_verified", False)
-    if from_floor is None or from_level is None or msg.get("from_verified") is None:
-        sid = msg.get("from_session")
-        s = sessions.get(sid) if sid else None
-        if from_floor is None:
-            from_floor = (s.get("floor") if isinstance(s, dict) else 0) or 0
-        if from_level is None:
-            from_level = (s.get("level") if isinstance(s, dict) else 0) or 0
-        if msg.get("from_verified") is None:
-            from_verified = bool((s or {}).get("verified", False))
-    return int(from_floor or 0), int(from_level or 0), bool(from_verified)
+def _sender_progress_for_msg(msg: dict) -> Tuple[int, int, bool]:
+    """Return (floor, level, verified) from a pigeon message's captured fields."""
+    from_floor = int(msg.get("from_floor") or 0)
+    from_level = int(msg.get("from_level") or 0)
+    from_verified = bool(msg.get("from_verified", False))
+    return from_floor, from_level, from_verified
 
-# Compute a 0..1 closeness factor within the preferred floor range
 def _closeness_weight(sender_floor: int, recipient_floor: int) -> float:
+    """Compute a 0–1 closeness factor based on floor proximity."""
     delta = abs(sender_floor - recipient_floor)
     if delta > FLOOR_PROXIMITY_RANGE:
         return 0.0
     return max(0.0, 1.0 - (delta / (FLOOR_PROXIMITY_RANGE + 1)))
 
-# Age-based booster: up to +AGE_BOOST_MAX after AGE_BOOST_FULL_SECONDS
 def _age_boost(created_iso: str) -> float:
+    """Compute an age-based delivery priority boost (0 to AGE_BOOST_MAX)."""
     try:
         created_dt = datetime.fromisoformat(created_iso)
     except Exception:
@@ -1574,9 +1777,9 @@ def _age_boost(created_iso: str) -> float:
         return 0.0
     return min(AGE_BOOST_MAX, AGE_BOOST_MAX * (age / AGE_BOOST_FULL_SECONDS))
 
-# Compute composite weight for weighted-random selection
-def _message_weight(msg: dict, recipient_session: dict, sessions: dict) -> float:
-    sender_floor, sender_level, sender_verified = _sender_progress_for_msg(msg, sessions)
+def _message_weight(msg: dict, recipient_session: dict) -> float:
+    """Compute a delivery priority weight for a pigeon message."""
+    sender_floor, sender_level, sender_verified = _sender_progress_for_msg(msg)
     recipient_floor = int(recipient_session.get("floor", 0))
     weight = 1.0
     close = _closeness_weight(sender_floor, recipient_floor)
@@ -1592,9 +1795,8 @@ def _message_weight(msg: dict, recipient_session: dict, sessions: dict) -> float
     weight *= random.uniform(RANDOM_JITTER_MIN, RANDOM_JITTER_MAX)  # jitter
     return max(weight, 0.0)
 
-# Purge old sessions
 def purge_old_sessions():
-    # Delete sessions older than SESSION_PURGE_AGE_DAYS with error handling
+    """Delete sessions older than SESSION_PURGE_AGE_DAYS from the database."""
     try:
         cutoff = (datetime.utcnow() - timedelta(days=SESSION_PURGE_AGE_DAYS)).isoformat()
         conn = get_db_connection()
@@ -1609,7 +1811,7 @@ def purge_old_sessions():
         log_error('purge_old_sessions', e)
 
 def session_purge_worker():
-    # Background thread to purge old sessions every BACKGROUND_WORKER_SLEEP_SECONDS
+    """Background thread that periodically purges old sessions and expired PoW challenges."""
     while True:
         try:
             purge_old_sessions()
@@ -1617,11 +1819,11 @@ def session_purge_worker():
             if ENABLE_VOCAGUARD:
                 expired_count = vocaguard_validator.cleanup_expired_challenges()
                 if expired_count > 0:
-                    log_to_general_json({
-                        'ts': int(datetime.utcnow().timestamp()),
-                        'event': 'pow_challenge_cleanup',
-                        'expired_count': expired_count
-                    })
+                    error_logger.info(
+                        '%s|session_purge_worker|INFO|pow_challenge_cleanup expired_count=%d',
+                        datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+                        expired_count
+                    )
         except Exception as e:
             log_error('session_purge_worker', e)
         time.sleep(BACKGROUND_WORKER_SLEEP_SECONDS)
@@ -1630,23 +1832,6 @@ def session_purge_worker():
 purge_thread = threading.Thread(target=session_purge_worker, daemon=True)
 purge_thread.start()
 
-# Main entry point to run the Flask app
+# Main entry point
 if __name__ == '__main__':
-    # Check if SSL certificates are available
-    cert_path = os.path.join(os.path.dirname(__file__), 'ssl', 'certificate.pem')
-    key_path = os.path.join(os.path.dirname(__file__), 'ssl', 'priv-key.pem')
-    
-    if os.path.exists(cert_path) and os.path.exists(key_path):
-        ssl_context = (cert_path, key_path)
-        print("SSL certificates found. Running with HTTPS.")
-    else:
-        ssl_context = None
-        print("WARNING: SSL certificates not found. Falling back to HTTP. This is insecure and should only be used for development.")
-    
-    # Use SSL context for HTTPS if available, otherwise HTTP
-    app.run(
-        debug=False,
-        host='0.0.0.0',
-        port=9601,
-        ssl_context=ssl_context
-    )
+    app.run(debug=False, host='0.0.0.0', port=9601)

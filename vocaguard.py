@@ -3,9 +3,217 @@
 # Developers can use this module or implement their own validation logic
 
 from datetime import datetime, timedelta
-from typing import Dict, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 import hashlib
+import math
 import secrets
+
+
+# ---------------------------------------------------------------------------
+# Behavioral Fingerprinting
+# ---------------------------------------------------------------------------
+
+class BehaviorProfile:
+    """Per-session accumulator for behavioral timing signals.
+
+    Stores raw timestamps so that statistical features can be computed
+    on-demand without needing the original request data.
+    """
+    __slots__ = ('update_ts', 'floor_enter_ts', 'levelup_ts', 'created_at')
+
+    def __init__(self) -> None:
+        self.update_ts: List[float] = []       # epoch of each /api/update
+        self.floor_enter_ts: Dict[int, float] = {}  # floor -> epoch entered
+        self.levelup_ts: List[float] = []      # epoch of each level-up
+        self.created_at: float = datetime.utcnow().timestamp()
+
+
+class BehavioralFingerprinter:
+    """Detect bot-like behavior by analyzing timing patterns.
+
+    All analysis is server-side only — no client cooperation required.
+    Signals tracked:
+      * Update-interval regularity  (bots send at fixed cadence)
+      * Floor-completion-time uniformity  (bots clear each floor identically)
+      * Level-up rhythm consistency  (bots level up mechanically)
+      * Burst patterns  (scripted rapid-fire followed by silence)
+    """
+
+    # -- Tuning knobs -------------------------------------------------------
+    # Minimum data points before behavioral analysis activates.
+    MIN_UPDATE_SAMPLES = 6
+    MIN_FLOOR_TRANSITIONS = 3
+
+    # Coefficient-of-variation thresholds (stdev / mean).
+    # Real humans typically show CV > 0.15; bots < 0.05.
+    INTERVAL_CV_HARD = 0.05   # below → mechanical (score 1.0)
+    INTERVAL_CV_SOFT = 0.10   # below → somewhat suspicious (score 0.5)
+    FLOOR_TIME_CV_HARD = 0.08
+    FLOOR_TIME_CV_SOFT = 0.12
+
+    # Burst detection: flag if ≥60 % of intervals fall in the shortest 20 %
+    # of the observed range — a sign of scripted rapid-fire.
+    BURST_CLUSTER_RATIO = 0.60
+    BURST_RANGE_FRACTION = 0.20
+
+    # Overall suspicion score thresholds (0.0 = human, 1.0 = definite bot).
+    SUSPICION_HARD_THRESHOLD = 0.75  # reject the update
+
+    # Profile time-to-live — should be ≥ session timeout (default 2 h).
+    PROFILE_TTL_SECONDS = 2 * 60 * 60
+
+    def __init__(self) -> None:
+        self._profiles: Dict[str, BehaviorProfile] = {}
+
+    # -- Public API ---------------------------------------------------------
+
+    def record_update(
+        self,
+        session_id: str,
+        current_floor: int,
+        current_level: int,
+        new_floor: int,
+        new_level: int,
+    ) -> None:
+        """Record a progress-update event for later analysis."""
+        profile = self._profiles.get(session_id)
+        if profile is None:
+            profile = BehaviorProfile()
+            self._profiles[session_id] = profile
+
+        now = datetime.utcnow().timestamp()
+        profile.update_ts.append(now)
+
+        if new_floor > current_floor:
+            profile.floor_enter_ts[new_floor] = now
+            # Back-fill the starting floor if we haven't seen it yet
+            if current_floor not in profile.floor_enter_ts:
+                profile.floor_enter_ts[current_floor] = profile.created_at
+
+        if new_level > current_level:
+            profile.levelup_ts.append(now)
+
+    def analyze(self, session_id: str) -> Tuple[float, Dict[str, Any]]:
+        """Return *(suspicion_score, details)* for *session_id*.
+
+        The score ranges from 0.0 (natural) to 1.0 (mechanical).
+        *details* contains the contributing signal verdicts.
+        """
+        profile = self._profiles.get(session_id)
+        if profile is None or len(profile.update_ts) < self.MIN_UPDATE_SAMPLES:
+            return 0.0, {'reason': 'insufficient_data'}
+
+        signals: List[float] = []
+        details: Dict[str, Any] = {}
+
+        # Signal 1 — update-interval regularity
+        intervals = self._intervals(profile.update_ts)
+        if len(intervals) >= 3:
+            cv = self._cv(intervals)
+            details['interval_cv'] = round(cv, 4)
+            sig, verdict = self._score_cv(cv, self.INTERVAL_CV_HARD, self.INTERVAL_CV_SOFT)
+            signals.append(sig)
+            details['interval_verdict'] = verdict
+
+        # Signal 2 — floor-completion-time uniformity
+        floor_durs = self._floor_durations(profile)
+        if len(floor_durs) >= self.MIN_FLOOR_TRANSITIONS:
+            cv = self._cv(floor_durs)
+            details['floor_time_cv'] = round(cv, 4)
+            sig, verdict = self._score_cv(cv, self.FLOOR_TIME_CV_HARD, self.FLOOR_TIME_CV_SOFT)
+            signals.append(sig)
+            details['floor_verdict'] = verdict
+
+        # Signal 3 — level-up rhythm
+        if len(profile.levelup_ts) >= self.MIN_UPDATE_SAMPLES:
+            lu_intervals = self._intervals(profile.levelup_ts)
+            if len(lu_intervals) >= 3:
+                cv = self._cv(lu_intervals)
+                details['levelup_cv'] = round(cv, 4)
+                sig, verdict = self._score_cv(cv, self.INTERVAL_CV_HARD, self.INTERVAL_CV_SOFT)
+                signals.append(sig)
+                details['levelup_verdict'] = verdict
+
+        # Signal 4 — burst detection
+        if len(intervals) >= 5:
+            is_burst, burst_ratio = self._detect_burst(intervals)
+            details['burst_ratio'] = round(burst_ratio, 4)
+            if is_burst:
+                signals.append(0.8)
+                details['burst_verdict'] = 'scripted'
+            else:
+                signals.append(0.0)
+                details['burst_verdict'] = 'natural'
+
+        if not signals:
+            return 0.0, details
+
+        score = round(sum(signals) / len(signals), 4)
+        details['score'] = score
+        details['signal_count'] = len(signals)
+        return score, details
+
+    def cleanup_stale_profiles(self) -> int:
+        """Remove profiles older than *PROFILE_TTL_SECONDS*."""
+        cutoff = datetime.utcnow().timestamp() - self.PROFILE_TTL_SECONDS
+        stale = [sid for sid, p in self._profiles.items() if p.created_at < cutoff]
+        for sid in stale:
+            del self._profiles[sid]
+        return len(stale)
+
+    def remove_profile(self, session_id: str) -> None:
+        """Explicitly drop a session's profile (e.g. on session delete)."""
+        self._profiles.pop(session_id, None)
+
+    # -- Private helpers ----------------------------------------------------
+
+    @staticmethod
+    def _intervals(timestamps: List[float]) -> List[float]:
+        return [timestamps[i] - timestamps[i - 1] for i in range(1, len(timestamps))]
+
+    @staticmethod
+    def _cv(values: List[float]) -> float:
+        """Coefficient of variation (σ / μ). Returns inf when < 2 samples."""
+        n = len(values)
+        if n < 2:
+            return float('inf')
+        mean = sum(values) / n
+        if mean == 0:
+            return 0.0
+        variance = sum((v - mean) ** 2 for v in values) / n
+        return math.sqrt(variance) / mean
+
+    @staticmethod
+    def _score_cv(cv: float, hard: float, soft: float) -> Tuple[float, str]:
+        """Map a CV value to a (signal_score, verdict) pair."""
+        if cv < hard:
+            return 1.0, 'mechanical'
+        if cv < soft:
+            return 0.5, 'suspicious'
+        return 0.0, 'natural'
+
+    @staticmethod
+    def _floor_durations(profile: BehaviorProfile) -> List[float]:
+        sorted_floors = sorted(profile.floor_enter_ts.items())
+        durations = []
+        for i in range(1, len(sorted_floors)):
+            dur = sorted_floors[i][1] - sorted_floors[i - 1][1]
+            if dur > 0:
+                durations.append(dur)
+        return durations
+
+    def _detect_burst(self, intervals: List[float]) -> Tuple[bool, float]:
+        """Return *(is_burst, cluster_ratio)*."""
+        if not intervals:
+            return False, 0.0
+        s = sorted(intervals)
+        total_range = s[-1] - s[0]
+        if total_range <= 0:
+            return True, 1.0  # all identical → definite burst
+        threshold = s[0] + total_range * self.BURST_RANGE_FRACTION
+        clustered = sum(1 for v in s if v <= threshold)
+        ratio = clustered / len(s)
+        return ratio >= self.BURST_CLUSTER_RATIO, ratio
 
 
 class VocaGuardValidator:
@@ -13,12 +221,13 @@ class VocaGuardValidator:
     Anti-cheat validator for game progress.
     
     Detects and reports:
-    - Floor regression (level going backwards)
-    - Level regression (level going backwards on same floor)
+    - Floor regression (going backwards)
+    - Level regression (going backwards on same floor)
     - Floor skips (jumping more than 1 floor)
     - Level jumps (jumping more than 1 level on same floor)
     - EXP validation (ensuring EXP matches level progression)
-    - Level-up frequency abuse (max 10 level-ups per 60 seconds)
+    - Level-up frequency abuse (max N level-ups per window)
+    - Behavioral fingerprinting (timing-pattern anomaly detection)
     """
     
     # Minimum seconds between floor increments (prevents speed hacking)
@@ -33,8 +242,10 @@ class VocaGuardValidator:
         """Initialize the validator."""
         # Store active challenges: {challenge_id: {session_id, secret, created_at}}
         self._active_challenges: Dict[str, Dict] = {}
-        # Track level-up history per session: {session_id: [timestamps]}
-        self._levelup_history: Dict[str, list] = {}
+        # Track level-up timestamps per session (epoch floats)
+        self._levelup_history: Dict[str, List[float]] = {}
+        # Behavioral fingerprinter
+        self._fingerprinter = BehavioralFingerprinter()
     
     def validate_progress_update(
         self,
@@ -139,44 +350,45 @@ class VocaGuardValidator:
                     # Invalid timestamp format, treat as valid (don't block)
                     pass
         
-        # Check 8: Level-up frequency abuse (max 10 level-ups per 60 seconds)
+        # Check 8: Level-up frequency abuse
         if new_level > current_level:
-            # Initialize session history if needed
             if session_id not in self._levelup_history:
                 self._levelup_history[session_id] = []
             
-            # Get current time
             now = datetime.utcnow()
-            history = self._levelup_history[session_id]
+            now_ts = now.timestamp()
             
             # Remove old entries outside the time window
-            cutoff_time = now - timedelta(seconds=self.LEVELUP_FREQUENCY_WINDOW_SECONDS)
+            cutoff_ts = (now - timedelta(seconds=self.LEVELUP_FREQUENCY_WINDOW_SECONDS)).timestamp()
             self._levelup_history[session_id] = [
-                ts for ts in history if datetime.fromisoformat(ts) > cutoff_time
+                ts for ts in self._levelup_history[session_id] if ts > cutoff_ts
             ]
             
-            # Check if we've hit the limit
             if len(self._levelup_history[session_id]) >= self.MAX_LEVELUPS_PER_MINUTE:
                 return False, "Level-up frequency limit exceeded", {
                     "cheat_type": "levelup_spam",
-                    "levelups_in_last_60s": len(self._levelup_history[session_id]),
-                    "max_allowed": self.MAX_LEVELUPS_PER_MINUTE
+                    "levelups_in_window": len(self._levelup_history[session_id]),
+                    "max_allowed": self.MAX_LEVELUPS_PER_MINUTE,
+                    "window_seconds": self.LEVELUP_FREQUENCY_WINDOW_SECONDS
                 }
             
-            # Record this level-up
-            self._levelup_history[session_id].append(now.isoformat())
+            self._levelup_history[session_id].append(now_ts)
         
+        # Check 9: Behavioral fingerprinting
+        # Record timing data and analyze for bot-like patterns.
+        self._fingerprinter.record_update(
+            session_id, current_floor, current_level, new_floor, new_level
+        )
+        score, behavior_details = self._fingerprinter.analyze(session_id)
+        if score >= BehavioralFingerprinter.SUSPICION_HARD_THRESHOLD:
+            return False, "Unusual activity pattern detected", {
+                "cheat_type": "behavioral_anomaly",
+                "suspicion_score": score,
+                **behavior_details
+            }
+
         # All checks passed
         return True, None, None
-    
-    def get_timestamp_now(self) -> str:
-        """
-        Get current UTC timestamp in ISO format.
-        
-        Returns:
-            ISO format timestamp string
-        """
-        return datetime.utcnow().isoformat()
     
     def validate_submission(
         self,
@@ -320,7 +532,33 @@ class VocaGuardValidator:
             del self._active_challenges[challenge_id]
             expired_count += 1
         
+        # Also clean up stale behavioral profiles
+        expired_count += self._fingerprinter.cleanup_stale_profiles()
+        
+        # Clean up levelup history for sessions with no recent activity
+        levelup_cutoff = datetime.utcnow().timestamp() - BehavioralFingerprinter.PROFILE_TTL_SECONDS
+        stale_sessions = [
+            sid for sid, timestamps in self._levelup_history.items()
+            if not timestamps or max(timestamps) < levelup_cutoff
+        ]
+        for sid in stale_sessions:
+            del self._levelup_history[sid]
+        expired_count += len(stale_sessions)
+        
         return expired_count
+
+    def get_behavior_score(self, session_id: str) -> Tuple[float, Dict]:
+        """Return the current behavioral suspicion score for a session.
+
+        Returns:
+            (score, details) — score is 0.0–1.0, details explains signals.
+        """
+        return self._fingerprinter.analyze(session_id)
+
+    def remove_behavior_profile(self, session_id: str) -> None:
+        """Drop behavioral and timing data for a session (e.g. after deletion)."""
+        self._fingerprinter.remove_profile(session_id)
+        self._levelup_history.pop(session_id, None)
 
 
 # Global validator instance

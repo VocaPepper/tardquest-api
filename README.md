@@ -4,11 +4,14 @@ A Flask-based REST API for the TardQuest game featuring anti-cheat protection, l
 
 ## Features
 
-- **VocaGuard Anti-Cheat**: Server-enforced game progress validation with proof-of-work challenges
+- **VocaGuard Anti-Cheat**: Server-enforced game progress validation with proof-of-work challenges and behavioral fingerprinting
 - **Leaderboard**: Player rankings with captcha protection
 - **Carrier Pigeon Messaging**: Proximity-based message delivery between players
+- **Launcher Manifests**: Versioned launcher distribution for Win64 and Linux
 - **SQLite Database**: Persistent storage for sessions, leaderboard, and messages
+- **Structured Logging**: Rotating plain-text log files for access, abuse, and errors
 - **Rate Limiting**: Protection against spam and abuse
+- **Reverse Proxy Support**: Trusted `X-Forwarded-For` via Werkzeug `ProxyFix`
 - **Version Tracking**: API version validation on session creation
 
 ## Quick Start
@@ -18,7 +21,7 @@ A Flask-based REST API for the TardQuest game featuring anti-cheat protection, l
 - Python 3.8+
 - pip
 
-### Installation
+### Quick Start (Development Server)
 
 1. **Clone the repository**
    
@@ -33,13 +36,17 @@ A Flask-based REST API for the TardQuest game featuring anti-cheat protection, l
    pip install -r requirements.txt
    ```
 
-3. **Run the API (Development Server)**
+3. **Run the API**
    
    ```bash
    python TardQuest_API.py
    ```
    
    The API will start on `http://0.0.0.0:9601`
+   
+### Reverse Proxy (Production)
+
+SSL/TLS is expected to be terminated by a reverse proxy (e.g. nginx, Caddy). The app trusts one hop of `X-Forwarded-For` via Werkzeug `ProxyFix`, so `request.remote_addr` will reflect the real client IP. Adjust `x_for` in `ProxyFix(...)` if you have multiple proxy layers.
 
 ## Configuration
 
@@ -53,6 +60,9 @@ TURNSTILE_SECRET=your_turnstile_secret_key
 
 # Enable/disable VocaGuard anti-cheat validation (default: true)
 ENABLE_VOCAGUARD=true
+
+# API key for launcher manifest POST updates (optional)
+MANIFESTO_API_KEY=your_launcher_api_key
 ```
 
 ### Core Settings
@@ -62,26 +72,42 @@ The following constants are configured in `TardQuest_API.py`:
 | Setting                  | Value                                                     | Purpose                                                 |
 | ------------------------ | --------------------------------------------------------- | ------------------------------------------------------- |
 | **API Port**             | 9601                                                      | Server listening port                                   |
-| **API Version**          | 3.1.260111                                                | Format: MAJOR.MINOR.YYMMDD   |
-| **Min Client Version**   | 3.0.251123                                                | Minimum supported client version for session creation   |
-| **Session Timeout**      | 120 minutes                                               | Duration before session expires (resets on each update) |
+| **API Version**          | 3.2.260304                                                | Format: MAJOR.MINOR.YYMMDD                              |
+| **Min Client Version**   | 3.0.251113                                                | Minimum supported client version for session creation   |
+| **Session Timeout**      | 120 minutes                                               | Duration before session expires (resets on each update)  |
 | **Session Purge Age**    | 7 days                                                    | Old sessions automatically deleted                      |
-| **Max Pigeons**          | 20 per session                                            | Maximum carrier pigeons a player can hold               |
+| **Max Pigeons**          | 20 per session                                            | Maximum carrier pigeons a player can hold                |
 | **Message Length**       | 420 characters                                            | Maximum message length via pigeon                       |
 | **Rate Limits**          | 10/min (update), 5/min (message), 20/hr (pigeon purchase) | Per IP address                                          |
-| **PoW Challenge Expiry** | 24 hours                                                  | Challenge validity window before expiration             |
+| **PoW Challenge Expiry** | 24 hours                                                  | Challenge validity window before expiration              |
 
-### Logging & Configuration Files
+### Directory Layout
 
-All runtime data and logs are stored as JSON files:
+```
+tardquest-api/
+├── TardQuest_API.py          # Main application
+├── vocaguard.py              # Anti-cheat module
+├── tardquest.db              # SQLite database (auto-created)
+├── json/                     # Runtime JSON state/config
+│   ├── flagged.json          # Flagged IPs with abuse metrics
+│   ├── whitelist.json        # Admin whitelisted IPs
+│   ├── launcher-win64.json   # Win64 launcher manifest (optional)
+│   └── launcher-linux.json   # Linux launcher manifest (optional)
+└── logs/                     # Rotating log files (auto-created)
+    ├── access.log            # Every HTTP request
+    ├── vocaguard.log         # Abuse events, rejections, anti-cheat detections
+    └── error.log             # Server errors with tracebacks
+```
 
-| File             | Purpose                                                            |
-| ---------------- | ------------------------------------------------------------------ |
-| `tardquest.db`   | SQLite database (auto-created)                                     |
-| `vocaguard.json` | VocaGuard validation errors, rejections, and anti-cheat detections |
-| `log.json`       | General server errors and non-VocaGuard issues                     |
-| `flagged.json`   | Flagged IP addresses with abuse metrics and expiration times       |
-| `whitelist.json` | Whitelisted admin IP addresses for `/api/abuse` endpoint           |
+### Logging
+
+All logs are written as plain-text rotating files under `logs/` (10 MB max, 5 backups). Format varies per logger:
+
+| Log File              | Format                                                        | Purpose                                             |
+| --------------------- | ------------------------------------------------------------- | --------------------------------------------------- |
+| `logs/access.log`     | `TIMESTAMP IP METHOD PATH USER_AGENT STATUS REFERER`          | Every HTTP request (via `@app.after_request`)       |
+| `logs/vocaguard.log`  | `TIMESTAMP\|IP\|METRIC\|key=value ...` (pipe-delimited)       | Abuse events, VocaGuard rejections, anti-cheat hits |
+| `logs/error.log`      | `TIMESTAMP\|FUNCTION\|ERROR_TYPE\|MESSAGE\|TRACEBACK context` | Server errors with full stack traces                |
 
 ## API Endpoints
 
@@ -106,6 +132,14 @@ All runtime data and logs are stored as JSON files:
   - **Optional**: `challenge_id`, `challenge_proof` (required if session created via `/api/start`)
   - **Note**: Validates submission matches session progress if PoW enabled
 
+### Launcher Manifests
+
+- `GET /api/launcher-win64` - Retrieve the Win64 launcher manifest
+- `POST /api/launcher-win64` - Update the Win64 launcher manifest (requires `MANIFESTO_API_KEY`)
+  - **Operations**: `upsert_version` (default) or `replace_manifest`
+  - **Auth**: `X-API-Key` header or `Authorization: Bearer <key>`
+- `GET /api/launcher-linux` - Retrieve the Linux launcher manifest
+
 ### Carrier Pigeon (Messaging)
 
 - `GET /api/pigeon/inventory?session_id={id}` - Check pigeon count for session
@@ -115,7 +149,8 @@ All runtime data and logs are stored as JSON files:
 
 ### Admin (IP Whitelisted Only)
 
-- `GET /api/abuse` - View detailed abuse metrics and flagged IPs (requires whitelisted IP)
+- `GET /api/abuse` - View detailed abuse metrics, flagged IPs, and behavioral fingerprint scores (requires whitelisted IP)
+  - **Optional query param**: `session_id` to include that session's behavioral suspicion score
 
 ## VocaGuard Anti-Cheat System
 
@@ -125,14 +160,15 @@ VocaGuard is a modular anti-cheat system that validates game progress through mu
 
 1. **Proof-of-Work Challenge**: Cryptographic validation that client has server-issued secret
 2. **Progress Validation**: Detects impossible game states (regression, speed hacks, floor skips)
-3. **Submission Validation**: Ensures leaderboard submissions match session-tracked progress
+3. **Behavioral Fingerprinting**: Timing-pattern analysis to detect bot-like activity
+4. **Submission Validation**: Ensures leaderboard submissions match session-tracked progress
 
 ### How It Works
 
 #### Session Creation Flow
 
 ```
-Client: POST /api/start with version "3.0.251109"
+Client: POST /api/start with version "3.2.260304"
          ↓
 Server: Version check (major.minor must match)
          ↓
@@ -169,11 +205,26 @@ The validator enforces these rules during `/api/update` calls:
 | **Level Regression** | Level cannot decrease on the same floor |
 | **EXP Regression** | EXP cannot decrease from current value |
 | **Floor Skips** | Can only advance 1 floor at a time (no jumping) |
+| **Level Jumps** | Can only advance 1 level at a time on the same floor |
 | **EXP Validation** | Each level costs more EXP. Level N requires `(N-1)*N/2 * 10` total EXP (Level 1→2=10, Level 2→3=20, Level 3→4=30...) |
 | **Floor Speed Hack** | Minimum 10 seconds required between floor increments |
 | **Level-Up Spam** | Maximum 4 level-ups per 60 seconds (prevents `/giveexp` abuse) |
+| **Behavioral Fingerprinting** | Detects mechanical timing patterns (update-interval regularity, floor-time uniformity, level-up rhythm, burst patterns). Suspicion score ≥ 0.75 rejects the update |
 
-Violations are logged to `vocaguard.json` with detailed metadata for analysis.
+Violations are logged to `logs/vocaguard.log` with detailed metadata for analysis.
+
+### Behavioral Fingerprinting
+
+The `BehavioralFingerprinter` class analyzes server-side timing data to detect bot-like behavior with no client cooperation required. Four signals are tracked:
+
+| Signal | What It Measures | Bot Indicator |
+|--------|-----------------|---------------|
+| **Update-interval regularity** | Coefficient of variation of time between `/api/update` calls | CV < 0.05 → mechanical |
+| **Floor-completion-time uniformity** | CV of time spent on each floor | CV < 0.08 → mechanical |
+| **Level-up rhythm** | CV of intervals between level-ups | CV < 0.05 → mechanical |
+| **Burst detection** | Whether ≥60% of intervals cluster in the shortest 20% of range | High cluster ratio → scripted |
+
+Signals are averaged into a 0.0–1.0 suspicion score. Analysis activates after 6+ update samples. Profiles are cleaned up after 2 hours (matching the session timeout).
 
 ### Enabling/Disabling VocaGuard
 
@@ -198,17 +249,17 @@ The API automatically creates `tardquest.db` with the following tables:
 ```sql
 CREATE TABLE sessions (
     session_id TEXT PRIMARY KEY,
-    floor INTEGER,
-    level INTEGER,
-    expires TEXT,
-    created TEXT,
-    inv TEXT,
+    floor INTEGER NOT NULL,
+    level INTEGER NOT NULL,
+    expires TEXT NOT NULL,
+    created TEXT NOT NULL,
+    inv TEXT NOT NULL,
     last_level_update TEXT,
     last_floor_update TEXT,
     last_message_received_at TEXT,
     last_from_session_delivered TEXT,
-    verified INTEGER,
-    created_via TEXT  -- 'api_start' (PoW enabled) or 'vocaguard_legacy' (legacy)
+    verified INTEGER DEFAULT 0,
+    created_via TEXT DEFAULT 'api_start'  -- 'api_start' (PoW enabled) or 'vocaguard_legacy' (legacy)
 )
 ```
 
@@ -216,9 +267,10 @@ CREATE TABLE sessions (
 
 ```sql
 CREATE TABLE leaderboard (
-    name TEXT,
-    floor INTEGER,
-    level INTEGER
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    floor INTEGER NOT NULL,
+    level INTEGER NOT NULL
 )
 ```
 
@@ -226,50 +278,25 @@ CREATE TABLE leaderboard (
 
 ```sql
 CREATE TABLE pigeons (
-    from_session_id TEXT,
-    to_session_id TEXT,
-    message TEXT,
-    expires TEXT
+    id TEXT PRIMARY KEY,
+    text TEXT NOT NULL,
+    from_session TEXT NOT NULL,
+    from_floor INTEGER NOT NULL,
+    from_level INTEGER NOT NULL,
+    from_verified INTEGER NOT NULL,
+    created TEXT NOT NULL,
+    delivered INTEGER DEFAULT 0,
+    delivered_at TEXT,
+    delivered_to TEXT
 )
 ```
 
 ### Maintenance
 
-- **Old sessions**: Automatically purged after 7 days of inactivity
+- **Old sessions**: Automatically purged after 7 days by a background thread
+- **PoW challenges**: Expired challenges and stale behavioral profiles cleaned up during purge cycle
 - **Database optimization**: WAL mode enabled, pragma optimizations applied
 - **Backup**: Manually backup `tardquest.db` for production deployments
-
-## Deployment
-
-### Development Server
-
-```bash
-python TardQuest_API.py
-```
-
-Starts unencrypted HTTP server on `http://0.0.0.0:9601`. Suitable for local testing only.
-
-### HTTPS/SSL (Production)
-
-For HTTPS support, place SSL certificates in the `ssl/` directory:
-
-```
-ssl/
-  ├── certificate.pem    # SSL certificate
-  └── priv-key.pem       # Private key
-```
-
-The API will automatically detect these files and enable HTTPS. Update client configuration to use `https://` URLs.
-
-### Port Configuration
-
-Change the default port by editing `TardQuest_API.py`:
-
-```python
-if __name__ == '__main__':
-    # Change 9601 to desired port
-    app.run(host='0.0.0.0', port=9601, ssl_context=ssl_context if ssl_required else None)
-```
 
 ## Development
 
@@ -302,11 +329,9 @@ is_valid, error_message, abuse_details = validator.validate_progress_update(
 if not is_valid:
     print(f"Validation failed: {error_message}")
     print(f"Details: {abuse_details}")
-    # Returns: {
-    #   "cheat_type": "levelup_spam",
-    #   "levelups_in_last_60s": 5,
-    #   "max_allowed": 5
-    # }
+    # Example abuse_details:
+    # {"cheat_type": "levelup_spam", "levelups_in_window": 5, "max_allowed": 4, "window_seconds": 60}
+    # {"cheat_type": "behavioral_anomaly", "suspicion_score": 0.82, "interval_cv": 0.03, ...}
 ```
 
 **Return values:**
@@ -314,6 +339,22 @@ if not is_valid:
 - `is_valid` (bool): Whether update passed all checks
 - `error_message` (str): Human-readable error description
 - `abuse_details` (dict): Cheat detection metadata with `cheat_type` and relevant values
+
+#### Behavioral Scoring
+
+Query the current behavioral suspicion score for a session:
+
+```python
+score, details = validator.get_behavior_score(session_id='abc123')
+# score: 0.0 (natural) to 1.0 (mechanical)
+# details: {'interval_cv': 0.23, 'interval_verdict': 'natural', ...}
+```
+
+Clean up a session's behavioral data (e.g. on deletion):
+
+```python
+validator.remove_behavior_profile(session_id='abc123')
+```
 
 #### Submission Validation
 
@@ -353,11 +394,11 @@ is_valid, error_message = validator.verify_challenge_proof(
 
 #### Cleanup Expired Challenges
 
-Periodically remove expired challenges from memory (call during maintenance):
+Periodically remove expired challenges, stale behavioral profiles, and old level-up history from memory:
 
 ```python
 expired_count = validator.cleanup_expired_challenges()
-print(f"Removed {expired_count} expired challenges")
+print(f"Removed {expired_count} expired items")
 ```
 
 ## Client Integration
@@ -389,7 +430,7 @@ Edit `tardAPI.js` to set the API endpoint and client version:
 const API_BASE = 'http://your-domain-or-ip:9601';
 
 /** @const {string} Client API version (major.minor must match server) */
-const CLIENT_API_VERSION = '3.0.YYDDMM';
+const CLIENT_API_VERSION = '3.2.YYMMDD';
 
 /** @const {string} LocalStorage key for session ID persistence */
 const LS_SESSION_KEY = 'tardquestSID';
@@ -489,7 +530,7 @@ The `/api/abuse` endpoint is protected by IP whitelisting. Only requests from wh
 
 #### Configure Whitelist
 
-Edit `whitelist.json`:
+Edit `json/whitelist.json`:
 
 ```json
 {
@@ -511,7 +552,13 @@ Retrieve abuse metrics from whitelisted IP:
 curl http://your-api:9601/api/abuse -H "Accept: application/json"
 ```
 
-Unauthorized access attempts are logged to `log.json`.
+Query behavioral score for a specific session:
+
+```bash
+curl "http://your-api:9601/api/abuse?session_id=SESSION_UUID" -H "Accept: application/json"
+```
+
+Unauthorized access attempts are logged to `logs/error.log`.
 
 ## License
 
