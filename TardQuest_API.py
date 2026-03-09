@@ -31,9 +31,7 @@ app = Flask(__name__)
 # This ensures request.remote_addr reflects the real client IP
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 # Enable CORS for specified origins to allow cross-origin requests
-CORS(app, origins=["http://localhost:5500", "http://localhost:9599", "https://vocapepper.com", "https://milklounge.wang", "https://uploads.ungrounded.net"])
-# 5500: Used for local development, change as needed
-# 9599: Used for Electron app in production
+CORS(app, origins=["app://tard.quest", "https://vocapepper.com", "https://milklounge.wang", "https://uploads.ungrounded.net"])
 
 # --- Directory Layout ---
 # JSON state/config files live under json/
@@ -618,24 +616,28 @@ def log_vocaguard_event(event: Dict) -> None:
         event: Dictionary containing event data (ts, ip, metric, etc.)
     """
     try:
+        def _sanitize_log_field(val: Any) -> str:
+            """Strip pipe and newline characters to prevent log injection."""
+            return str(val).replace('|', '_').replace('\n', ' ').replace('\r', ' ')
+
         ts = datetime.utcfromtimestamp(event.get('ts', int(datetime.utcnow().timestamp()))).strftime('%Y-%m-%d %H:%M:%S')
-        ip = event.get('ip', 'unknown')
-        metric = event.get('metric', 'unknown')
+        ip = _sanitize_log_field(event.get('ip', 'unknown'))
+        metric = _sanitize_log_field(event.get('metric', 'unknown'))
         parts = [ts, ip, metric]
         # Append optional structured fields
         if event.get('sid'):
-            parts.append(f"sid={event['sid']}")
+            parts.append(f"sid={_sanitize_log_field(event['sid'])}")
         if event.get('reason'):
-            parts.append(f"reason={event['reason']}")
+            parts.append(f"reason={_sanitize_log_field(event['reason'])}")
         if event.get('ua'):
-            parts.append(f"ua={event['ua']}")
+            parts.append(f"ua={_sanitize_log_field(event['ua'])}")
         if event.get('extra'):
             for k, v in event['extra'].items():
-                parts.append(f"{k}={v}")
+                parts.append(f"{_sanitize_log_field(k)}={_sanitize_log_field(v)}")
         if event.get('data_excerpt'):
             for k, v in event['data_excerpt'].items():
                 if v is not None:
-                    parts.append(f"{k}={v}")
+                    parts.append(f"{_sanitize_log_field(k)}={_sanitize_log_field(v)}")
         vocaguard_logger.info('|'.join(str(p) for p in parts))
     except Exception as e:
         print(f"VOCAGUARD LOG ERROR: {e}")
@@ -945,6 +947,13 @@ def tardquest_start():
             "reason": f"Update client to at least {MIN_CLIENT_VERSION}"
         }), 400
     
+    # Abuse flag check
+    flagged, info = _is_flagged(request.remote_addr)
+    if flagged:
+        info = info or {}
+        _record_abuse('blocked_request', request.remote_addr)
+        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
+
     # Version check passed, proceed with session creation
     session_id = str(uuid.uuid4())
     expires = (datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)).isoformat()
@@ -989,6 +998,13 @@ def vocaguard_update():
     if not isinstance(session_id, str) or not session_id:
         return jsonify({"error": "session_id required"}), 400
     
+    # Abuse flag check
+    flagged, info = _is_flagged(request.remote_addr)
+    if flagged:
+        info = info or {}
+        _record_abuse('blocked_request', request.remote_addr, session_id)
+        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
+
     # VALIDATE TYPES EARLY to prevent TypeError (type safety fix)
     try:
         floor = int(data.get('floor', 0))
@@ -1157,7 +1173,7 @@ def leaderboard():
             return jsonify(leaderboard_data)
         except Exception as e:
             log_error('leaderboard_get', e)
-            return jsonify({"error": str(e)}), 500
+            return jsonify({"error": "Internal server error"}), 500
     # POST: Update the leaderboard
     elif request.method == 'POST':
         try:
@@ -1276,7 +1292,7 @@ def leaderboard():
             return jsonify({"message": "Leaderboard updated successfully", "data": leaderboard_data})
         except Exception as e:
             log_error('leaderboard_post', e, {'request_data': str(new_entry)})
-            return jsonify({"error": str(e)}), 500
+            return jsonify({"error": "Internal server error"}), 500
 
     return jsonify({"error": "Method not allowed"}), 405
 
@@ -1541,7 +1557,7 @@ def abuse_status():
         })
     except Exception as e:
         log_error('abuse_status', e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 # --- Utility Functions ---
 
