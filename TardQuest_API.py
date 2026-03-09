@@ -19,7 +19,7 @@ import time
 import traceback
 import logging
 from logging.handlers import RotatingFileHandler
-from threading import Lock
+from threading import Lock, RLock
 
 # Import VocaGuard anti-cheat module
 from vocaguard import validator as vocaguard_validator
@@ -87,7 +87,8 @@ flagged_ips_lock = Lock()
 whitelist_lock = Lock()
 launcher_manifest_lock = Lock()
 # Per-session lock to prevent race conditions on concurrent updates
-session_ops_lock = Lock()
+# RLock (reentrant) so pigeon_send can hold it while calling update_session
+session_ops_lock = RLock()
 
 # --- Application Configuration Constants ---
 # Major.Minor.Patch
@@ -539,7 +540,7 @@ def mark_pigeon_delivered(pigeon_id: str, delivered_to_session: str) -> bool:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
-            'UPDATE pigeons SET delivered = 1, delivered_at = ?, delivered_to = ? WHERE id = ?',
+            'UPDATE pigeons SET delivered = 1, delivered_at = ?, delivered_to = ? WHERE id = ? AND delivered = 0',
             (datetime.utcnow().isoformat(), delivered_to_session, pigeon_id)
         )
         conn.commit()
@@ -1077,10 +1078,24 @@ def vocaguard_update():
 @app.route('/api/status', methods=['GET'])
 def api_status():
     # Returns API status
+    # Abuse flag check
+    flagged, info = _is_flagged(request.remote_addr)
+    if flagged:
+        info = info or {}
+        _record_abuse('blocked_request', request.remote_addr)
+        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
+    
     return jsonify({"status": "ok", "version": API_VERSION}), 200
 
 @app.route('/api/launcher-win64', methods=['GET', 'POST'])
 def launcher_win64():
+    # Abuse flag check
+    flagged, info = _is_flagged(request.remote_addr)
+    if flagged:
+        info = info or {}
+        _record_abuse('blocked_request', request.remote_addr)
+        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
+    
     try:
         if request.method == 'GET':
             manifest = _load_launcher_manifest()
@@ -1138,6 +1153,13 @@ def launcher_win64():
     
 @app.route('/api/launcher-linux', methods=['GET'])
 def launcher_linux():
+    # Abuse flag check
+    flagged, info = _is_flagged(request.remote_addr)
+    if flagged:
+        info = info or {}
+        _record_abuse('blocked_request', request.remote_addr)
+        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
+    
     try:
         launcher_file = os.path.join(_json_dir, 'launcher-linux.json')
         if not os.path.exists(launcher_file):
@@ -1154,6 +1176,13 @@ def launcher_linux():
 # Handle leaderboard GET and POST requests
 @app.route('/api/leaderboard', methods=['GET', 'POST'])
 def leaderboard():
+    # Abuse flag check
+    flagged, info = _is_flagged(request.remote_addr)
+    if flagged:
+        info = info or {}
+        _record_abuse('blocked_request', request.remote_addr)
+        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
+    
     # GET: Return the current leaderboard
     if request.method == 'GET':
         try:
@@ -1390,89 +1419,86 @@ def pigeon_send():
         _record_abuse('blocked_request', request.remote_addr, session_id)
         return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
 
-    # Fetch only this session (no full-table load)
-    session = get_session_by_id(session_id)
-    if not session:
-        _record_abuse('invalid_session', request.remote_addr, session_id)
-        return jsonify({"error": "Invalid session"}), 400
-    
-    if _is_session_expired(session):
-        _record_abuse('session_expired', request.remote_addr, session_id)
-        delete_session(session_id)
-        return jsonify({"error": "Session expired"}), 400
+    # CRITICAL SECTION: Hold lock for entire request to prevent race conditions
+    # (inventory depletion, message limit bypass, duplicate bypass)
+    with session_ops_lock:
+        # Fetch only this session (no full-table load) - inside lock for freshness
+        session = get_session_by_id(session_id)
+        if not session:
+            _record_abuse('invalid_session', request.remote_addr, session_id)
+            return jsonify({"error": "Invalid session"}), 400
+        
+        if _is_session_expired(session):
+            _record_abuse('session_expired', request.remote_addr, session_id)
+            delete_session(session_id)
+            return jsonify({"error": "Session expired"}), 400
 
-    session = _ensure_inventory(session)
-    if session['inv']['carrierPigeon'] <= 0:
-        _record_abuse('no_inventory', request.remote_addr, session_id)
-        return jsonify({"error": "No carrier pigeon in inventory"}), 400
+        session = _ensure_inventory(session)
+        if session['inv']['carrierPigeon'] <= 0:
+            _record_abuse('no_inventory', request.remote_addr, session_id)
+            return jsonify({"error": "No carrier pigeon in inventory"}), 400
 
-    text = sanitize_pigeon_message(raw_text)
-    if not text:
-        _record_abuse('sanitize_reject', request.remote_addr, session_id)
-        return jsonify({"error": "Message rejected (empty/invalid after sanitation)"}), 400
+        text = sanitize_pigeon_message(raw_text)
+        if not text:
+            _record_abuse('sanitize_reject', request.remote_addr, session_id)
+            return jsonify({"error": "Message rejected (empty/invalid after sanitation)"}), 400
 
-    # Check message count for this session (targeted query, LIMIT)
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('SELECT COUNT(*) FROM pigeons WHERE from_session = ? AND delivered = 0', (session_id,))
-    message_count = cur.fetchone()[0]
-    conn.close()
-    
-    if message_count >= MAX_PIGEONS_PER_SESSION:
-        _record_abuse('message_cap', request.remote_addr, session_id)
-        return jsonify({"error": "Session pigeon message limit reached"}), 429
+        # All pigeon DB ops in one connection with try/finally to prevent leaks
+        conn = get_db_connection()
+        try:
+            cur = conn.cursor()
 
-    # Check for duplicate (targeted query)
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        'SELECT id FROM pigeons WHERE from_session = ? AND text = ? ORDER BY created DESC LIMIT 1',
-        (session_id, text)
-    )
-    if cur.fetchone():
-        conn.close()
-        _record_abuse('duplicate', request.remote_addr, session_id)
-        return jsonify({"error": "Duplicate message"}), 400
-    conn.close()
+            # Check message count for this session
+            cur.execute('SELECT COUNT(*) FROM pigeons WHERE from_session = ? AND delivered = 0', (session_id,))
+            message_count = cur.fetchone()[0]
 
-    # Decrement pigeon inventory
-    new_pigeon_count = session['inv']['carrierPigeon'] - 1
-    update_session(session_id, {
-        'inv': {**session['inv'], 'carrierPigeon': new_pigeon_count}
-    })
+            if message_count >= MAX_PIGEONS_PER_SESSION:
+                _record_abuse('message_cap', request.remote_addr, session_id)
+                return jsonify({"error": "Session pigeon message limit reached"}), 429
 
-    # Insert pigeon message (targeted INSERT, not full rewrite)
-    pigeon_id = str(uuid.uuid4())
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        '''INSERT INTO pigeons (id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-        (pigeon_id, text, session_id, int(session.get("floor", 0)), int(session.get("level", 0)), 
-         bool(session.get("verified", False)), datetime.utcnow().isoformat(), 0, None, None)
-    )
-    conn.commit()
-    conn.close()
+            # Check for duplicate (only among undelivered messages)
+            cur.execute(
+                'SELECT id FROM pigeons WHERE from_session = ? AND text = ? AND delivered = 0 ORDER BY created DESC LIMIT 1',
+                (session_id, text)
+            )
+            if cur.fetchone():
+                _record_abuse('duplicate', request.remote_addr, session_id)
+                return jsonify({"error": "Duplicate message"}), 400
 
-    # Count pending pigeons (targeted COUNT query)
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('SELECT COUNT(*) FROM pigeons WHERE delivered = 0')
-    pending = cur.fetchone()[0]
-    
-    cur.execute('SELECT COUNT(*) FROM pigeons')
-    total = cur.fetchone()[0]
-    conn.close()
+            # Decrement pigeon inventory
+            new_pigeon_count = session['inv']['carrierPigeon'] - 1
+            update_session(session_id, {
+                'inv': {**session['inv'], 'carrierPigeon': new_pigeon_count}
+            })
 
-    _record_abuse('message_sent', request.remote_addr, session_id)
+            # Insert pigeon message
+            pigeon_id = str(uuid.uuid4())
+            cur.execute(
+                '''INSERT INTO pigeons (id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (pigeon_id, text, session_id, int(session.get("floor", 0)), int(session.get("level", 0)),
+                 1 if session.get("verified") else 0, datetime.utcnow().isoformat(), 0, None, None)
+            )
+            conn.commit()
 
-    return jsonify({
-        "stored": True,
-        "queue_length_pending": pending,
-        "queue_length_total": total,
-        "sanitized_text": text,
-        "carrierPigeon_remaining": new_pigeon_count
-    }), 200
+            # Count pending pigeons
+            cur.execute('SELECT COUNT(*) FROM pigeons WHERE delivered = 0')
+            pending = cur.fetchone()[0]
+
+            cur.execute('SELECT COUNT(*) FROM pigeons')
+            total = cur.fetchone()[0]
+        finally:
+            conn.close()
+
+        _record_abuse('message_sent', request.remote_addr, session_id)
+
+        return jsonify({
+            "stored": True,
+            "queue_length_pending": pending,
+            "queue_length_total": total,
+            "sanitized_text": text,
+            "carrierPigeon_remaining": new_pigeon_count
+        }), 200
 
 # Deliver a pigeon message to session
 @app.route('/api/pigeon/delivery', methods=['POST'])
@@ -1482,6 +1508,13 @@ def pigeon_delivery():
     session_id = data.get('session_id')
     if not session_id:
         return jsonify({"error": "session_id required"}), 400
+    
+    # Abuse flag check
+    flagged, info = _is_flagged(request.remote_addr)
+    if flagged:
+        info = info or {}
+        _record_abuse('blocked_request', request.remote_addr, session_id)
+        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
     
     # Fetch only this session (no full-table load)
     session = get_session_by_id(session_id)
@@ -1495,16 +1528,22 @@ def pigeon_delivery():
         return jsonify({"error": "Session expired"}), 400
 
     # Use optimized delivery function with targeted query
-    delivered_msg = get_pending_pigeon_for_delivery(
-        session.get('floor', 0),
-        session_id,
-        session.get('last_from_session_delivered')
-    )
+    # Retry loop: if another request claimed the pigeon between SELECT and UPDATE, try again
+    delivered_msg = None
+    for _attempt in range(3):
+        candidate = get_pending_pigeon_for_delivery(
+            session.get('floor', 0),
+            session_id,
+            session.get('last_from_session_delivered')
+        )
+        if not candidate:
+            break
+        # Atomically claim: returns False if another request already delivered it
+        if mark_pigeon_delivered(candidate['id'], session_id):
+            delivered_msg = candidate
+            break
     
     if delivered_msg:
-        # Mark single pigeon delivered (targeted UPDATE, not full rewrite)
-        mark_pigeon_delivered(delivered_msg['id'], session_id)
-        
         # Update session metadata (targeted UPDATE, not full rewrite)
         update_session(session_id, {
             'last_message_received_at': datetime.utcnow().isoformat(),
