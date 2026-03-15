@@ -92,7 +92,7 @@ session_ops_lock = RLock()
 
 # --- Application Configuration Constants ---
 # Major.Minor.Patch
-API_VERSION = "3.2.260304"
+API_VERSION = "3.2.260315"
 MIN_CLIENT_VERSION = "3.0.251113" # Minimum supported client version
 # Server-Client check looks at Major.Minor only for compatibility, patch is numbered by date last edited in YYMMDD format.
 # Legacy endpoints ignore this check, as they are deprecated and will be removed in future versions.
@@ -115,6 +115,13 @@ MANIFESTO_API_KEY = os.getenv('MANIFESTO_API_KEY', '').strip()
 # --- Anti-Cheat Configuration ---
 # Enable/disable VocaGuard anti-cheat validation on progress updates
 ENABLE_VOCAGUARD = os.getenv('ENABLE_VOCAGUARD', 'true').lower() in ('true', '1', 'yes')
+# Allow legacy PoW proof format for older clients
+ALLOW_LEGACY_POW = os.getenv('ALLOW_LEGACY_POW', 'true').lower() in ('true', '1', 'yes')
+# Modern PoW leading-zero difficulty (clamped)
+try:
+    POW_DIFFICULTY_PREFIX_ZEROS = max(1, min(8, int(os.getenv('POW_DIFFICULTY_PREFIX_ZEROS', '4'))))
+except (TypeError, ValueError):
+    POW_DIFFICULTY_PREFIX_ZEROS = 4
 
 # --- Session Configuration ---
 SESSION_TIMEOUT_MINUTES = 120  # 2 hours (resets on vocaguard update)
@@ -209,6 +216,18 @@ def init_db():
             delivered INTEGER DEFAULT 0,
             delivered_at TEXT,
             delivered_to TEXT
+        )
+        """
+    )
+    cur.execute(
+        # Track pigeon murders reported by players
+        """
+        CREATE TABLE IF NOT EXISTS pigeon_murders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            pigeon_id TEXT,
+            murdered_at TEXT NOT NULL,
+            UNIQUE(session_id, pigeon_id)
         )
         """
     )
@@ -593,6 +612,75 @@ def get_deliverable_pigeon_count(session_id: str) -> int:
         log_error('get_deliverable_pigeon_count', e, {'session_id': session_id})
         return 0
 
+def record_pigeon_murder(session_id: str, pigeon_id: Optional[str] = None) -> str:
+    """
+    Record a pigeon murder event for a session.
+
+    Args:
+        session_id: The session that reported the murder
+        pigeon_id: Optional pigeon ID for de-duplication
+
+    Returns:
+        'ok' on insert, 'duplicate' if already reported for this session+pigeon,
+        or 'error' on unexpected failure.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            'INSERT INTO pigeon_murders (session_id, pigeon_id, murdered_at) VALUES (?, ?, ?)',
+            (session_id, pigeon_id, datetime.utcnow().isoformat())
+        )
+        conn.commit()
+        return 'ok'
+    except sqlite3.IntegrityError:
+        return 'duplicate'
+    except Exception as e:
+        log_error('record_pigeon_murder', e, {'session_id': session_id, 'pigeon_id': pigeon_id})
+        return 'error'
+    finally:
+        if conn:
+            conn.close()
+
+def get_pigeon_murder_totals(session_id: Optional[str] = None) -> Dict[str, int]:
+    """
+    Get aggregate pigeon murder totals.
+
+    Args:
+        session_id: Optional session to include per-session count
+
+    Returns:
+        Dictionary with total_murdered, unique_players, session_murdered
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute('SELECT COUNT(*) FROM pigeon_murders')
+        total = int(cur.fetchone()[0])
+
+        cur.execute('SELECT COUNT(DISTINCT session_id) FROM pigeon_murders')
+        unique_players = int(cur.fetchone()[0])
+
+        session_total = 0
+        if session_id:
+            cur.execute('SELECT COUNT(*) FROM pigeon_murders WHERE session_id = ?', (session_id,))
+            session_total = int(cur.fetchone()[0])
+
+        return {
+            'total_murdered': total,
+            'unique_players': unique_players,
+            'session_murdered': session_total,
+        }
+    except Exception as e:
+        log_error('get_pigeon_murder_totals', e, {'session_id': session_id})
+        return {'total_murdered': 0, 'unique_players': 0, 'session_murdered': 0}
+    finally:
+        if conn:
+            conn.close()
+
 # --- Helper Functions for API Responses ---
 
 def _is_session_expired(session: Dict) -> bool:
@@ -975,16 +1063,20 @@ def tardquest_start():
     }
     save_session(session_id, new_session)
 
-    response_data = {
+    response_data: Dict[str, Any] = {
         "session_id": session_id,
         "server_version": API_VERSION
     }
 
     # Generate proof-of-work challenge if VocaGuard is enabled
     if ENABLE_VOCAGUARD:
-        challenge_id, challenge_secret = vocaguard_validator.generate_challenge(session_id)
+        challenge_id, challenge_salt = vocaguard_validator.generate_challenge(session_id)
         response_data["challenge_id"] = challenge_id
-        response_data["challenge_secret"] = challenge_secret
+        response_data["challenge_salt"] = challenge_salt
+        response_data["challenge_difficulty"] = POW_DIFFICULTY_PREFIX_ZEROS
+        if ALLOW_LEGACY_POW:
+            # Backwards compatibility for older clients that expect challenge_secret
+            response_data["challenge_secret"] = challenge_salt
 
     return jsonify(response_data), 200
 
@@ -1291,7 +1383,9 @@ def leaderboard():
                     pow_valid, pow_error = vocaguard_validator.verify_challenge_proof(
                         session_id=new_entry['session_id'],
                         challenge_id=challenge_id,
-                        client_proof=challenge_proof
+                        client_proof=challenge_proof,
+                        allow_legacy=ALLOW_LEGACY_POW,
+                        difficulty=POW_DIFFICULTY_PREFIX_ZEROS
                     )
                     
                     if not pow_valid:
@@ -1559,6 +1653,65 @@ def pigeon_delivery():
         "pigeon_id": delivered_msg["id"] if delivered_msg else None,
         "remaining_queue_pending": pending
     }), 200
+
+# Pigeon Murder Reporting
+@app.route('/api/pigeon/murder', methods=['GET', 'POST'])
+@limiter.limit("30 per hour", exempt_when=lambda: request.method == 'GET')
+def pigeon_murder():
+    if request.method == 'GET':
+        session_id = (request.args.get('session_id') or request.args.get('SID') or '').strip() or None
+        totals = get_pigeon_murder_totals(session_id)
+
+        payload: Dict[str, Any] = {
+            "murder_total": totals['total_murdered'],
+            "players_with_murders": totals['unique_players']
+        }
+        if session_id:
+            payload["session_id"] = session_id
+            payload["session_murder_total"] = totals['session_murdered']
+
+        return jsonify(payload), 200
+
+    data = request.get_json() or {}
+    session_id = (data.get('session_id') or data.get('SID') or '').strip()
+    pigeon_id = (data.get('pigeon_id') or '').strip() or None
+    if not session_id:
+        return jsonify({"error": "session_id required"}), 400
+
+    # Abuse flag check
+    flagged, info = _is_flagged(request.remote_addr)
+    if flagged:
+        info = info or {}
+        _record_abuse('blocked_request', request.remote_addr, session_id)
+        return jsonify({"error": "Temporarily blocked due to abuse", "until": info.get('until')}), 429
+
+    # Fetch only this session (no full-table load)
+    session = get_session_by_id(session_id)
+    if not session:
+        _record_abuse('invalid_session', request.remote_addr, session_id)
+        return jsonify({"error": "Invalid session"}), 400
+
+    if _is_session_expired(session):
+        _record_abuse('session_expired', request.remote_addr, session_id)
+        delete_session(session_id)
+        return jsonify({"error": "Session expired"}), 400
+
+    # Record murder event (optionally de-duplicated by pigeon_id)
+    murder_result = record_pigeon_murder(session_id, pigeon_id)
+    if murder_result == 'ok':
+        _record_abuse('pigeon_murdered', request.remote_addr, session_id)
+        totals = get_pigeon_murder_totals(session_id)
+        return jsonify({
+            "murdered": True,
+            "session_id": session_id,
+            "pigeon_id": pigeon_id,
+            "murder_total": totals['total_murdered'],
+            "session_murder_total": totals['session_murdered']
+        }), 200
+    if murder_result == 'duplicate':
+        return jsonify({"murdered": False, "error": "Murder already reported for this pigeon", "pigeon_id": pigeon_id}), 409
+
+    return jsonify({"murdered": False, "error": "Failed to record murder"}), 500
 
 # Get abuse status (whitelisted IPs only)
 @app.route('/api/abuse', methods=['GET']) # simplified abuse status endpoint

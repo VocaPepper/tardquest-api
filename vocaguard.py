@@ -234,6 +234,8 @@ class VocaGuardValidator:
     MIN_FLOOR_INCREMENT_SECONDS = 10
     # Proof-of-work challenge expiration in seconds
     POW_CHALLENGE_EXPIRY_SECONDS = 24 * 60 * 60  # 24 hours
+    # Number of leading hex zeros required in PoW hash
+    POW_DIFFICULTY_PREFIX_ZEROS = 4
     # Level-up frequency limits
     MAX_LEVELUPS_PER_MINUTE = 4
     LEVELUP_FREQUENCY_WINDOW_SECONDS = 60
@@ -422,46 +424,55 @@ class VocaGuardValidator:
     
     def generate_challenge(self, session_id: str) -> Tuple[str, str]:
         """
-        Generate a cryptographic challenge for a session.
+        Generate a challenge salt for a session.
         
-        The challenge should be stored on the client and included in the final submission.
-        This prevents offline modification of session data.
+        The client must include this challenge metadata in final submission and
+        provide a valid PoW proof.
         
         Args:
             session_id: The session identifier
         
         Returns:
-            Tuple of (challenge_id, challenge_secret)
+            Tuple of (challenge_id, challenge_salt)
             - challenge_id: Public identifier returned to client (include in submission)
-            - challenge_secret: Server-side secret used to verify proof
+            - challenge_salt: Salt used to verify proof
         """
         challenge_id = secrets.token_hex(16)  # 32 character hex string
-        challenge_secret = secrets.token_hex(32)  # 64 character hex string
+        challenge_salt = secrets.token_hex(32)  # 64 character hex string
         
         self._active_challenges[challenge_id] = {
             'session_id': session_id,
-            'secret': challenge_secret,
+            'secret': challenge_salt,
             'created_at': datetime.utcnow().isoformat()
         }
         
-        return challenge_id, challenge_secret
+        return challenge_id, challenge_salt
     
     def verify_challenge_proof(
         self,
         session_id: str,
         challenge_id: str,
-        client_proof: str
+        client_proof: str,
+        allow_legacy: bool = False,
+        difficulty: int = POW_DIFFICULTY_PREFIX_ZEROS
     ) -> Tuple[bool, Optional[str]]:
         """
         Verify that client has valid proof-of-work for their session.
-        
-        The client receives a secret and must compute SHA256(secret + session_id).
-        By including this proof in submission, they prove they had the server-issued secret.
+
+        Preferred client proof format:
+        nonce:hash
+        where hash = SHA256(f"{session_id}:{challenge_id}:{challenge_salt}:{nonce}")
+        and hash must start with N leading zero hex chars.
+
+        Legacy format (optional):
+        hash where hash = SHA256(challenge_salt + session_id)
         
         Args:
             session_id: The session identifier
             challenge_id: The challenge identifier
-            client_proof: The computed proof from client (SHA256 hex digest)
+            client_proof: The proof string from client
+            allow_legacy: Whether old proof format remains accepted
+            difficulty: Required leading-zero count for modern PoW
         
         Returns:
             Tuple of (is_valid, error_message)
@@ -490,21 +501,47 @@ class VocaGuardValidator:
         except (ValueError, TypeError):
             return False, "Invalid challenge timestamp"
         
+        client_proof = (client_proof or '').strip().lower()
+        if not client_proof:
+            return False, "Proof-of-work value missing"
+
         # Compute expected proof
         secret = challenge_data['secret']
-        expected_proof = hashlib.sha256(
-            (secret + session_id).encode('utf-8')
-        ).hexdigest()
-        
-        # Verify proof matches (constant-time comparison to prevent timing attacks)
-        is_valid = secrets.compare_digest(client_proof, expected_proof)
-        
-        if is_valid:
+        required_prefix = '0' * max(1, int(difficulty))
+
+        # Modern format: nonce:hash
+        if ':' in client_proof:
+            nonce, submitted_hash = client_proof.split(':', 1)
+            if not nonce or len(submitted_hash) != 64:
+                return False, "Invalid proof format"
+
+            expected_hash = hashlib.sha256(
+                f"{session_id}:{challenge_id}:{secret}:{nonce}".encode('utf-8')
+            ).hexdigest()
+
+            if not secrets.compare_digest(submitted_hash, expected_hash):
+                return False, "Proof-of-work verification failed"
+
+            if not submitted_hash.startswith(required_prefix):
+                return False, "Proof-of-work difficulty not met"
+
             # Clean up challenge after successful use
             del self._active_challenges[challenge_id]
             return True, None
-        else:
+
+        # Legacy format: SHA256(secret + session_id)
+        if allow_legacy:
+            expected_legacy_proof = hashlib.sha256(
+                (secret + session_id).encode('utf-8')
+            ).hexdigest()
+
+            if secrets.compare_digest(client_proof, expected_legacy_proof):
+                del self._active_challenges[challenge_id]
+                return True, None
+
             return False, "Proof-of-work verification failed"
+
+        return False, "Legacy proof format is disabled"
     
     def cleanup_expired_challenges(self) -> int:
         """
