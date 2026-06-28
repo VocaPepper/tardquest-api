@@ -27,7 +27,6 @@ coverage/
 
 # Testing
 test_client/
-tests/
 
 # OS files
 .DS_Store
