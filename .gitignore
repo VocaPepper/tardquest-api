@@ -1,0 +1,34 @@
+# Private endpoint code
+src/private/
+
+# Build output
+dist/
+
+# Database
+data/
+
+# Logs
+logs/
+
+# JSON state files
+json/
+
+# Environment
+.env
+
+# Node
+node_modules/
+
+# Private docs
+docs/private/
+
+# Coverage
+coverage/
+
+# Testing
+test_client/
+tests/
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,40 @@
+{
+  "name": "tardquest-api",
+  "version": "4.0.2606",
+  "description": "TardQuest API server (Node.js rewrite)",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "build:public": "node esbuild.config.js public",
+    "build:private": "node esbuild.config.js private",
+    "build": "node esbuild.config.js public && node esbuild.config.js private",
+    "start:public": "node dist/public.js",
+    "start:private": "node dist/private.js",
+    "dev:public": "node --watch src/entries/public.js",
+    "dev:private": "node --watch src/private/entries/private.js",
+    "test": "c8 mocha 'tests/**/*.test.js'",
+    "test:coverage": "c8 --reporter=html --reporter=text mocha 'tests/**/*.test.js'"
+  },
+  "keywords": [
+    "tardquest",
+    "game-api"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "better-sqlite3": "^11.7.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.2.0",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "c8": "^10.1.3",
+    "chai": "^5.1.2",
+    "esbuild": "^0.24.2",
+    "mocha": "^10.8.0",
+    "supertest": "^7.0.0"
+  }
+}
