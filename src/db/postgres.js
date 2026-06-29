@@ -20,6 +20,10 @@ if (fs.existsSync(privatePath)) {
     generateRecoveryCodes: () => [],
     rotateRecoveryCodes: async () => ({ codes: null, error: 'Account service unavailable' }),
     resetPasswordWithRecoveryCode: async () => ({ ok: false, error: 'Account service unavailable' }),
+    hashOnlineToken: () => '',
+    createOnlineAuthSession: async () => null,
+    verifyOnlineAuthToken: async () => ({ valid: false, error: 'Online auth service unavailable' }),
+    deleteSessionsByUsername: async () => 0,
     close: async () => {},
   };
 }

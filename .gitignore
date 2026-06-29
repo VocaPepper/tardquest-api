@@ -27,6 +27,7 @@ coverage/
 
 # Testing
 test_client/
+web.config
 
 # OS files
 .DS_Store

@@ -10,14 +10,6 @@ function buildApp(routeModules) {
 
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
-  app.use((req, res, next) => {
-    if (req.ip) {
-      const stripped = req.ip.replace(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d+$/, '$1');
-      if (stripped !== req.ip) req.ip = stripped;
-    }
-    next();
-  });
-
   app.use(cors({
     origin: config.corsOrigins,
   }));
