@@ -38,7 +38,13 @@ function register(app) {
     }
 
     const linkedUsername = sessionService.linkAuthSession(data.auth_session_id);
-    const session = sessionService.createApiSession(linkedUsername);
+    let session;
+    try {
+      session = sessionService.createApiSession(linkedUsername);
+    } catch (e) {
+      logger.logError('start_createSession', e);
+      return res.status(500).json({ error: 'Failed to create session', server_version: config.apiVersion });
+    }
 
     const responseData = {
       session_id: session.session_id,

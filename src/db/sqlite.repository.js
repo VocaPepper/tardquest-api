@@ -28,8 +28,11 @@ function saveSession(sessionId, session) {
       session.created_via || 'api_start',
       session.username || null,
     );
+    return true;
   } catch (e) {
     logger.logError('saveSession', e, { sessionId });
+    console.error('saveSession FAILED:', e.message);
+    return false;
   }
 }
 

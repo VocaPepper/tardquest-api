@@ -21,7 +21,10 @@ function createApiSession(username) {
     created_via: username ? 'auth_login' : 'api_start',
     username: username || null,
   };
-  repo.saveSession(sessionId, session);
+  const saved = repo.saveSession(sessionId, session);
+  if (!saved) {
+    throw new Error('Failed to persist session to database');
+  }
   return session;
 }
 

@@ -1,5 +1,4 @@
 const path = require('node:path');
-const fs = require('node:fs');
 const dotenv = require('dotenv');
 
 dotenv.config();
@@ -20,13 +19,17 @@ function envBool(key, fallback) {
   return ['true', '1', 'yes'].includes(v.toLowerCase());
 }
 
-// Merge private config on top of public defaults when profile is "private"
+// Merge private config on top of public defaults when profile is "private".
+// Use a static require() path so esbuild can bundle it at build time.
+// The try/catch handles the case where src/private/ doesn't exist
+// (e.g. public-only checkout or CI build without private sources).
 let merged = { ...defaults };
 if ((process.env.API_PROFILE || defaults.profile).toLowerCase() === 'private') {
-  const privateConfigPath = path.join(__dirname, 'private', 'server.config.js');
-  if (fs.existsSync(privateConfigPath)) {
-    const privateDefaults = require(privateConfigPath);
+  try {
+    const privateDefaults = require('./private/server.config.js');
     merged = { ...merged, ...privateDefaults };
+  } catch (e) {
+    console.warn('Private profile selected but private config could not be loaded:', e.message);
   }
 }
 
