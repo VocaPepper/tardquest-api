@@ -19,10 +19,7 @@ function buildApp(routeModules) {
   });
 
   app.use(cors({
-    origin: (origin, cb) => {
-      if (!origin || config.corsOrigins.includes(origin)) return cb(null, true);
-      cb(null, false);
-    },
+    origin: config.corsOrigins,
   }));
 
   app.use(express.json({ limit: config.bodyLimit }));
