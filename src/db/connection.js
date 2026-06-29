@@ -45,7 +45,8 @@ function initDb(database) {
       last_from_session_delivered TEXT,
       verified INTEGER DEFAULT 0,
       created_via TEXT DEFAULT 'api_start',
-      username TEXT DEFAULT NULL
+      username TEXT DEFAULT NULL,
+      died_at TEXT DEFAULT NULL
     );
 
     CREATE TABLE IF NOT EXISTS pigeons (
@@ -82,6 +83,13 @@ function initDb(database) {
     CREATE INDEX IF NOT EXISTS idx_online_sessions_expires ON online_sessions (expires);
     CREATE INDEX IF NOT EXISTS idx_pigeons_undelivered ON pigeons (delivered, from_session);
   `);
+
+  // Migrate existing databases: add died_at column if missing
+  try {
+    database.exec('ALTER TABLE sessions ADD COLUMN died_at TEXT DEFAULT NULL');
+  } catch (e) {
+    // Column already exists — ignore
+  }
 }
 
 function closeDb() {

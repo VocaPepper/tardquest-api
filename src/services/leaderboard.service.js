@@ -68,4 +68,12 @@ async function submitScore(session, name, floor, level) {
   return { data: result };
 }
 
-module.exports = { getLeaderboard, submitScore, cleanHtml, cleanJson };
+function removeAccountEntry(username) {
+  if (!username) return { error: 'Username required' };
+  const cleaned = username.replace(/[^A-Za-z0-9_ ]/g, '').toUpperCase();
+  if (!cleaned) return { error: 'Invalid username' };
+  const removed = repo.deleteLeaderboardEntryByName(cleaned);
+  return removed ? { removed: true } : { removed: false };
+}
+
+module.exports = { getLeaderboard, submitScore, removeAccountEntry, cleanHtml, cleanJson };

@@ -9,8 +9,8 @@ function saveSession(sessionId, session) {
     const db = getDbConnection();
     const stmt = db.prepare(`
       INSERT OR REPLACE INTO sessions
-        (session_id, floor, level, exp, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified, created_via, username)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (session_id, floor, level, exp, expires, created, inv, last_level_update, last_floor_update, last_message_received_at, last_from_session_delivered, verified, created_via, username, died_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       sessionId,
@@ -27,6 +27,7 @@ function saveSession(sessionId, session) {
       session.verified ? 1 : 0,
       session.created_via || 'api_start',
       session.username || null,
+      session.died_at || null,
     );
     return true;
   } catch (e) {
@@ -42,7 +43,7 @@ function getSessionById(sessionId) {
     const row = db.prepare(`
       SELECT session_id, floor, level, exp, expires, created, inv,
              last_level_update, last_floor_update, last_message_received_at,
-             last_from_session_delivered, verified, created_via, username
+             last_from_session_delivered, verified, created_via, username, died_at
       FROM sessions WHERE session_id = ?
     `).get(sessionId);
     if (!row) return null;
@@ -61,6 +62,7 @@ function getSessionById(sessionId) {
       verified: !!row.verified,
       created_via: row.created_via || 'api_start',
       username: row.username || null,
+      died_at: row.died_at || null,
     };
   } catch (e) {
     logger.logError('getSessionById', e, { sessionId });
@@ -85,6 +87,7 @@ function updateSession(sessionId, updates) {
     if (updates.last_from_session_delivered !== undefined) { setClauses.push('last_from_session_delivered = ?'); params.push(updates.last_from_session_delivered); }
     if (updates.verified !== undefined) { setClauses.push('verified = ?'); params.push(updates.verified ? 1 : 0); }
     if (updates.username !== undefined) { setClauses.push('username = ?'); params.push(updates.username); }
+    if (updates.died_at !== undefined) { setClauses.push('died_at = ?'); params.push(updates.died_at); }
 
     if (setClauses.length === 0) return true;
     params.push(sessionId);
@@ -178,6 +181,17 @@ function submitLeaderboardEntry(name, floor, level) {
   } catch (e) {
     logger.logError('submitLeaderboardEntry', e, { name, floor, level });
     return null;
+  }
+}
+
+function deleteLeaderboardEntryByName(name) {
+  try {
+    const db = getDbConnection();
+    const result = db.prepare('DELETE FROM leaderboard WHERE UPPER(name) = UPPER(?)').run(name);
+    return result.changes > 0;
+  } catch (e) {
+    logger.logError('deleteLeaderboardEntryByName', e, { name });
+    return false;
   }
 }
 
@@ -464,6 +478,7 @@ module.exports = {
   purgeOldSessions,
   getLeaderboard,
   submitLeaderboardEntry,
+  deleteLeaderboardEntryByName,
   getPendingPigeonForDelivery,
   markPigeonDelivered,
   claimPigeonAtomically,

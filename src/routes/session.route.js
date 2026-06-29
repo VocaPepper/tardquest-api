@@ -3,6 +3,7 @@ const config = require('../config');
 const repo = require('../db/sqlite.repository');
 const abuse = require('../services/abuse.service');
 const sessionService = require('../services/session.service');
+const leaderboardService = require('../services/leaderboard.service');
 const { validateClientVersion } = require('../utils/validation');
 const { validator } = require('../services/vocaguard.service');
 const { limiter } = require('../middleware/rateLimiter');
@@ -64,7 +65,7 @@ function register(app) {
     res.json(responseData);
   });
 
-  app.post('/update', limiter({ windowMs: 60000, max: 10 }), (req, res) => {
+  app.post('/update', limiter({ windowMs: 60000, max: 10 }), async (req, res) => {
     const data = req.body || {};
     const sessionId = data.session_id;
 
@@ -90,6 +91,10 @@ function register(app) {
       return res.status(400).json({ error: 'Floor, level, and exp must be valid integers' });
     }
 
+    const died = data.died === true || data.died === 'true' || data.died === 1;
+    const challengeId = data.challenge_id;
+    const challengeProof = data.challenge_proof;
+
     const session = repo.getSessionById(sessionId);
     if (!session) {
       abuse.recordAbuse('invalid_session', req.ip, sessionId, { attempted_session: sessionId });
@@ -104,6 +109,11 @@ function register(app) {
       }
     } catch (e) {
       return res.status(400).json({ error: 'Session expired' });
+    }
+
+    if (session.died_at) {
+      abuse.recordAbuse('session_already_dead', req.ip, sessionId, { died_at: session.died_at });
+      return res.status(400).json({ error: 'Session has already ended' });
     }
 
     const currentFloor = session.floor;
@@ -127,7 +137,65 @@ function register(app) {
             : `Current level: ${currentLevel}, attempted: ${level}`,
         });
       }
+    }
 
+    const nowIso = new Date().toISOString();
+
+    // ── Death submission ──
+    if (died) {
+      if (config.enableVocaguard) {
+        if (!challengeId || !challengeProof) {
+          abuse.recordAbuse('death_pow_missing', req.ip, sessionId, {
+            challenge_id: !!challengeId, challenge_proof: !!challengeProof,
+          });
+          repo.updateSession(sessionId, { died_at: nowIso });
+          return res.status(400).json({ error: 'Proof-of-work challenge verification required for death submission' });
+        }
+
+        const powResult = validator.verifyChallengeProof(
+          sessionId, challengeId, challengeProof, config.powDifficultyPrefixZeros,
+        );
+
+        if (!powResult.valid) {
+          abuse.recordAbuse('death_pow_verification_failed', req.ip, sessionId, { reason: powResult.error });
+
+          if (session.username) {
+            try {
+              leaderboardService.removeAccountEntry(session.username);
+            } catch (e) {
+              logger.logError('death_rollback_failed', e, { sessionId, username: session.username });
+            }
+          }
+
+          repo.updateSession(sessionId, { died_at: nowIso });
+          return res.status(400).json({ error: `Death verification failed: ${powResult.error}` });
+        }
+      }
+
+      // PoW passed — freeze session and auto-submit final score if authenticated
+      const newLastFloorUpdate = floor > currentFloor ? nowIso : lastFloorUpdate;
+
+      if (session.username && (floor > currentFloor || level > currentLevel)) {
+        try {
+          await leaderboardService.submitScore(session, null, floor, level);
+        } catch (e) {
+          logger.logError('death_autosubmit_failed', e, { sessionId, username: session.username });
+        }
+      }
+
+      repo.updateSession(sessionId, {
+        floor,
+        level,
+        exp,
+        last_floor_update: newLastFloorUpdate,
+        died_at: nowIso,
+      });
+
+      return res.json({ status: 'updated', died: true });
+    }
+
+    // ── Normal progress update (not dying) ──
+    if (config.enableVocaguard) {
       try {
         validator.refreshChallengeForSession(sessionId);
       } catch (e) {
@@ -135,9 +203,17 @@ function register(app) {
       }
     }
 
-    const nowIso = new Date().toISOString();
     const newLastFloorUpdate = floor > currentFloor ? nowIso : lastFloorUpdate;
     const newExpires = new Date(Date.now() + config.sessionTimeoutMinutes * 60000).toISOString();
+
+    // Progressive auto-submit for authenticated users
+    if (session.username && (floor > currentFloor || level > currentLevel)) {
+      try {
+        await leaderboardService.submitScore(session, null, floor, level);
+      } catch (e) {
+        logger.logError('update_autosubmit_failed', e, { sessionId, username: session.username });
+      }
+    }
 
     repo.updateSession(sessionId, {
       floor,
