@@ -59,9 +59,7 @@ const config = {
   authBackoffBaseSeconds: envInt('AUTH_BACKOFF_BASE_SECONDS', merged.authBackoffBaseSeconds),
   authBackoffMaxSeconds: envInt('AUTH_BACKOFF_MAX_SECONDS', merged.authBackoffMaxSeconds),
 
-  corsOrigins: process.env.CORS_ORIGINS
-    ? process.env.CORS_ORIGINS.split(',').map(s => s.trim())
-    : merged.corsOrigins,
+  corsOrigins: merged.corsOrigins,
 
   rateLimitStorageUri: process.env.RATE_LIMIT_STORAGE_URI || merged.rateLimitStorageUri,
 
