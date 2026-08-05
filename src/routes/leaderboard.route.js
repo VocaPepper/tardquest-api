@@ -2,6 +2,7 @@ const repo = require('../db/sqlite.repository');
 const abuse = require('../services/abuse.service');
 const leaderboardService = require('../services/leaderboard.service');
 const { validator } = require('../services/vocaguard.service');
+const { isLeaderboardEligible } = require('../utils/validation');
 const config = require('../config');
 const logger = require('../utils/logger');
 
@@ -49,6 +50,18 @@ function register(app) {
         }
       } catch (e) {
         return res.status(400).json({ error: 'Session expired' });
+      }
+
+      // Pre-4.0 clients may play but cannot submit to the
+      // leaderboard. Tell them to update their client instead of accepting
+      // the score or rejecting it as an anti-cheat failure.
+      if (!isLeaderboardEligible(session.client_version)) {
+        return res.status(400).json({
+          error: 'Leaderboard submissions require client version 4.0 or newer. Please update your client.',
+          client_version: session.client_version,
+          minimum_required: config.minClientVersion,
+          update_required: true,
+        });
       }
 
       if (config.enableVocaguard) {

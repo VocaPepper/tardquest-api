@@ -29,6 +29,16 @@ function buildApp(routeModules) {
     next();
   });
 
+  // Pre 4.0-compatible API prefix. Register every route module on a sub-app
+  // mounted at /api as well, so both /status and /api/status (etc.) work.
+  // This keeps the Node port drop-in compatible with the production client.
+  const apiApp = express();
+  apiApp.set('trust proxy', 1);
+  for (const routeModule of routeModules) {
+    routeModule.register(apiApp);
+  }
+  app.use('/api', apiApp);
+
   for (const routeModule of routeModules) {
     routeModule.register(app);
   }

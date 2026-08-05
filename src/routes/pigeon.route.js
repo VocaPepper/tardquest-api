@@ -94,9 +94,14 @@ function register(app) {
 
     const result = pigeonService.sendPigeon(sessionId, rawText);
     if (result.error) {
-      abuse.recordAbuse(result.error === 'No carrier pigeon in inventory' ? 'no_inventory' :
-        result.error === 'Duplicate message' ? 'duplicate' : 'sanitize_reject',
-        req.ip, sessionId);
+      const metric =
+        result.error === 'Invalid session' ? 'invalid_session' :
+        result.error === 'Session expired' ? 'session_expired' :
+        result.error === 'No carrier pigeon in inventory' ? 'no_inventory' :
+        result.error === 'Duplicate message' ? 'duplicate' :
+        result.error === 'Session pigeon message limit reached' ? 'message_cap' :
+          'sanitize_reject';
+      abuse.recordAbuse(metric, req.ip, sessionId, { pigeon_error: result.error });
       return res.status(400).json({ error: result.error });
     }
 
@@ -114,7 +119,14 @@ function register(app) {
     }
 
     const result = pigeonService.deliverPigeon(sessionId);
-    if (result.error) return res.status(400).json({ error: result.error });
+    if (result.error) {
+      if (result.error === 'Invalid session') {
+        abuse.recordAbuse('invalid_session', req.ip, sessionId);
+      } else if (result.error === 'Session expired') {
+        abuse.recordAbuse('session_expired', req.ip, sessionId);
+      }
+      return res.status(400).json({ error: result.error });
+    }
     res.json(result);
   });
 

@@ -27,6 +27,7 @@ coverage/
 
 # Testing
 test_client/
+tests/integration/feature-test.js
 web.config
 
 # OS files

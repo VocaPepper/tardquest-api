@@ -47,6 +47,7 @@ const config = {
   port: envInt('PORT', merged.port),
   apiVersion: process.env.API_VERSION || merged.apiVersion,
   minClientVersion: process.env.MIN_CLIENT_VERSION || merged.minClientVersion,
+  minSupportedClientVersion: process.env.MIN_SUPPORTED_CLIENT_VERSION || merged.minSupportedClientVersion,
 
   sqliteDbPath: path.resolve(ROOT, process.env.SQLITE_DB_PATH || merged.sqliteDbPath),
   dbConnectionTimeoutSeconds: envInt('DB_CONNECTION_TIMEOUT_SECONDS', merged.dbConnectionTimeoutSeconds),

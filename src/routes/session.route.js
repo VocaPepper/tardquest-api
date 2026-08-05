@@ -4,7 +4,7 @@ const repo = require('../db/sqlite.repository');
 const abuse = require('../services/abuse.service');
 const sessionService = require('../services/session.service');
 const leaderboardService = require('../services/leaderboard.service');
-const { validateClientVersion } = require('../utils/validation');
+const { validateClientVersion, isLeaderboardEligible } = require('../utils/validation');
 const { validator } = require('../services/vocaguard.service');
 const { limiter } = require('../middleware/rateLimiter');
 const logger = require('../utils/logger');
@@ -28,7 +28,7 @@ function register(app) {
         error: versionCheck.error,
         server_version: config.apiVersion,
         client_version: clientVersion,
-        minimum_required: config.minClientVersion,
+        minimum_required: config.minSupportedClientVersion,
         reason: versionCheck.reason,
       });
     }
@@ -41,7 +41,7 @@ function register(app) {
     const linkedUsername = sessionService.linkAuthSession(data.auth_session_id);
     let session;
     try {
-      session = sessionService.createApiSession(linkedUsername);
+      session = sessionService.createApiSession(linkedUsername, clientVersion);
     } catch (e) {
       logger.logError('start_createSession', e);
       return res.status(500).json({ error: 'Failed to create session', server_version: config.apiVersion });
@@ -175,7 +175,7 @@ function register(app) {
       // PoW passed — freeze session and auto-submit final score if authenticated
       const newLastFloorUpdate = floor > currentFloor ? nowIso : lastFloorUpdate;
 
-      if (session.username && (floor > currentFloor || level > currentLevel)) {
+      if (session.username && isLeaderboardEligible(session.client_version) && (floor > currentFloor || level > currentLevel)) {
         try {
           await leaderboardService.submitScore(session, null, floor, level);
         } catch (e) {
@@ -206,8 +206,8 @@ function register(app) {
     const newLastFloorUpdate = floor > currentFloor ? nowIso : lastFloorUpdate;
     const newExpires = new Date(Date.now() + config.sessionTimeoutMinutes * 60000).toISOString();
 
-    // Progressive auto-submit for authenticated users
-    if (session.username && (floor > currentFloor || level > currentLevel)) {
+    // Progressive auto-submit for authenticated users (skip for old clients)
+    if (session.username && isLeaderboardEligible(session.client_version) && (floor > currentFloor || level > currentLevel)) {
       try {
         await leaderboardService.submitScore(session, null, floor, level);
       } catch (e) {

@@ -46,6 +46,7 @@ function initDb(database) {
       verified INTEGER DEFAULT 0,
       created_via TEXT DEFAULT 'api_start',
       username TEXT DEFAULT NULL,
+      client_version TEXT,
       died_at TEXT DEFAULT NULL
     );
 
@@ -87,6 +88,13 @@ function initDb(database) {
   // Migrate existing databases: add died_at column if missing
   try {
     database.exec('ALTER TABLE sessions ADD COLUMN died_at TEXT DEFAULT NULL');
+  } catch (e) {
+    // Column already exists — ignore
+  }
+
+  // Migrate existing databases: add client_version column if missing
+  try {
+    database.exec('ALTER TABLE sessions ADD COLUMN client_version TEXT');
   } catch (e) {
     // Column already exists — ignore
   }

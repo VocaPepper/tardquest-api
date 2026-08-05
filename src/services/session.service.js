@@ -3,7 +3,7 @@ const repo = require('../db/sqlite.repository');
 const config = require('../config');
 const logger = require('../utils/logger');
 
-function createApiSession(username) {
+function createApiSession(username, clientVersion) {
   const sessionId = crypto.randomUUID();
   const expires = new Date(Date.now() + config.sessionTimeoutMinutes * 60000).toISOString();
   const session = {
@@ -20,6 +20,9 @@ function createApiSession(username) {
     verified: false,
     created_via: username ? 'auth_login' : 'api_start',
     username: username || null,
+    // Account-login sessions are a 4.x flow, so default to the current API
+    // version (fully leaderboard-eligible) when no version is provided.
+    client_version: clientVersion || config.apiVersion,
   };
   const saved = repo.saveSession(sessionId, session);
   if (!saved) {

@@ -50,7 +50,8 @@ No configuration required — all defaults work out of the box.
 | `host` | `0.0.0.0` | Listen address |
 | `port` | `9601` | Listen port |
 | `apiVersion` | *(from `package.json`)* | Reported in status endpoint |
-| `minClientVersion` | *(from `package.json`)* | Minimum allowed client version |
+| `minClientVersion` | *(from `package.json`)* | Minimum client version for full features |
+| `minSupportedClientVersion` | `3.0.251113` | Minimum client version for limited features |
 | `bodyLimit` | `100kb` | Max JSON/URL-encoded payload size |
 | `sqliteDbPath` | `./data/tardquest.db` | SQLite database file |
 | `dbConnectionTimeoutSeconds` | `30` | Database connection timeout |
@@ -94,6 +95,18 @@ All endpoints return JSON. Standard HTTP status codes: 200 (success), 400 (bad r
 
 All protected endpoints accept a session ID via the **`X-Session-Id` HTTP header**.
 
+### Python-compatible `/api` prefix
+
+Every route is also served under the `/api` prefix for drop-in compatibility with the production (Python) server and the TardQuest Online client/gameServer:
+
+- `POST /api/auth/login`, `/api/auth/online/login`, `/api/auth/online/verify`, etc.
+- `POST /api/start`, `/api/update`
+- `GET|POST /api/leaderboard`
+- `GET|POST /api/pigeon/*`, `GET /api/abuse`
+- `GET|POST /api/launcher-win64`, `GET /api/launcher-linux`
+
+So both `POST /start` and `POST /api/start` work, and the TQO gameServer can verify bearer tokens against `POST /api/auth/online/verify`.
+
 ### `GET /status`
 
 Server health check.
@@ -109,6 +122,8 @@ Create a new game session.
 **Response:** `{ "session_id": "uuid", "server_version": "x.y.z" }`
 
 Returns a PoW challenge (challenge_id, challenge_salt, challenge_difficulty) when VocaGuard is enabled.
+
+**Client version compatibility:** clients `>= minSupportedClientVersion` (default `3.0.251113`) are accepted. Legacy 3.x clients can play, update progress, use pigeons, and fetch the leaderboard (gravestones), but **cannot submit to the leaderboard** — `POST /leaderboard` returns `400` with an `update_required` error telling them to update their client. Clients below `minSupportedClientVersion` are rejected outright.
 
 ### `POST /update`
 

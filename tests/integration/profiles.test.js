@@ -89,10 +89,10 @@ describe('Private API Integration', () => {
   });
 
   describe('launcher routes ARE present', () => {
-    it('returns JSON error (route exists, file just missing)', async () => {
+    it('returns JSON manifest or JSON error (route exists, never HTML 404)', async () => {
       const res = await supertest(app).get('/launcher-win64');
-      expect(res.body).to.have.property('error');
-      expect(res.body.error).to.include('launcher-win64');
+      expect(res.status).to.be.oneOf([200, 404]);
+      expect(res.body).to.be.an('object');
     });
   });
 

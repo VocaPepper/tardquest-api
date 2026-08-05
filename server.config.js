@@ -11,6 +11,10 @@ module.exports = {
   port: 9601,
   apiVersion: require('./package.json').version,
   minClientVersion: require('./package.json').version,
+  // Minimum client version that may connect at all. Older clients are rejected
+  // outright. Clients between this and minClientVersion can still play (pigeons,
+  // gravestones, progress updates) but cannot submit to the leaderboard.
+  minSupportedClientVersion: '3.0.251113',
   bodyLimit: '100kb',
 
   // ── Directories (relative to project root) ───────────────
