@@ -29,6 +29,15 @@ function versionGt(a, b) {
   return a.patch > b.patch;
 }
 
+// Compare major.minor only, ignoring the patch component.
+// Patch releases (e.g. 4.0.2606 vs 4.0.2608) are not breaking changes, so a
+// 4.0.x client should never be locked out of features by a newer 4.0.y patch.
+function versionGteMajorMinor(a, b) {
+  if (!a || !b) return false;
+  if (a.major !== b.major) return a.major > b.major;
+  return a.minor >= b.minor;
+}
+
 /**
  * Validate that a client version is new enough to connect at all.
  * Clients must be >= minSupportedClientVersion; anything older is rejected.
@@ -58,7 +67,9 @@ function isLeaderboardEligible(clientVersion) {
   const clientTuple = parseVersion(clientVersion);
   const minLeaderboardTuple = parseVersion(config.minClientVersion);
   if (!clientTuple || !minLeaderboardTuple) return false;
-  return versionGte(clientTuple, minLeaderboardTuple);
+  // Compare major.minor only so patch-level server bumps (e.g. 4.0.2608) don't
+  // lock out earlier 4.0.x clients.
+  return versionGteMajorMinor(clientTuple, minLeaderboardTuple);
 }
 
-module.exports = { parseVersion, versionGte, versionGt, validateClientVersion, isLeaderboardEligible };
+module.exports = { parseVersion, versionGte, versionGt, versionGteMajorMinor, validateClientVersion, isLeaderboardEligible };
