@@ -19,6 +19,12 @@ function envBool(key, fallback) {
   return ['true', '1', 'yes'].includes(v.toLowerCase());
 }
 
+function envList(key, fallback) {
+  const v = process.env[key];
+  if (v === undefined || v === '') return fallback;
+  return v.split(',').map(s => s.trim()).filter(Boolean);
+}
+
 // Merge private config on top of public defaults when profile is "private".
 // Use a static require() path so esbuild can bundle it at build time.
 // The try/catch handles the case where src/private/ doesn't exist
@@ -39,7 +45,9 @@ const config = {
   // Sensitive values — only from .env, no committed defaults
   accountDbUrl: process.env.TQ_DATABASE_URL || '',
   recoveryCodePepper: process.env.RECOVERY_CODE_PEPPER || '',
-  manifestoApiKey: process.env.MANIFESTO_API_KEY || '',
+
+  // Whitelisted TQO account usernames allowed to manage the launcher manifest
+  manifestoAdmins: envList('MANIFESTO_ADMINS', merged.manifestoAdmins),
 
   // Deployment-specific overrides (fallbacks from merged defaults)
   profile: (process.env.API_PROFILE || merged.profile).toLowerCase(),
