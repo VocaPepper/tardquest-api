@@ -1,6 +1,6 @@
 {
   "name": "tardquest-api",
-  "version": "4.0.2606",
+  "version": "4.0.2608",
   "description": "TardQuest API server (Node.js rewrite)",
   "main": "src/server.js",
   "type": "commonjs",
