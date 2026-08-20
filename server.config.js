@@ -6,6 +6,11 @@ module.exports = {
   // ── Profile ──────────────────────────────────────────────
   profile: 'public',
 
+  // ── Deploy Mode ─────────────────────────────────────────
+  // 'prod' enforces rate limits; 'dev' unlocks them.
+  // Override at runtime with DEPLOY_MODE (defaults to prod if unset).
+  deployMode: 'prod',
+
   // ── Server ───────────────────────────────────────────────
   host: '0.0.0.0',
   port: 9601,

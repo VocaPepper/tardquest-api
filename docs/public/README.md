@@ -47,6 +47,7 @@ No configuration required — all defaults work out of the box.
 
 | Key | Default | Description |
 |-----|---------|-------------|
+| `deployMode` | `prod` | `prod` enforces rate limits; `dev` unlocks them (set via `DEPLOY_MODE` env; defaults to `prod` if unset) |
 | `host` | `0.0.0.0` | Listen address |
 | `port` | `9601` | Listen port |
 | `apiVersion` | *(from `package.json`)* | Reported in status endpoint |

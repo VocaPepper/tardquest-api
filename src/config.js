@@ -51,6 +51,8 @@ const config = {
 
   // Deployment-specific overrides (fallbacks from merged defaults)
   profile: (process.env.API_PROFILE || merged.profile).toLowerCase(),
+  // DEPLOY_MODE: 'prod' enforces rate limits, 'dev' unlocks them. Defaults to 'prod'.
+  deployMode: (process.env.DEPLOY_MODE || merged.deployMode || 'prod').toLowerCase(),
   host: process.env.HOST || merged.host,
   port: envInt('PORT', merged.port),
   apiVersion: process.env.API_VERSION || merged.apiVersion,

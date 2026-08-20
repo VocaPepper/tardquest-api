@@ -1,4 +1,8 @@
+const config = require('../config');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
+
+// DEPLOY_MODE=dev unlocks rate limits. Anything else (or unset) enforces them.
+const RATE_LIMITS_ENABLED = config.deployMode !== 'dev';
 
 function createLimiter(options) {
   const defaults = {
@@ -10,7 +14,16 @@ function createLimiter(options) {
     },
     message: { error: 'Too many requests, please try again later.' },
   };
-  return rateLimit({ ...defaults, ...options });
+
+  const merged = { ...defaults, ...options };
+
+  // In dev mode, unlock rate limits entirely by skipping every request.
+  // Note: max: 0 blocks ALL requests in express-rate-limit v7+ — use skip instead.
+  if (!RATE_LIMITS_ENABLED) {
+    merged.skip = () => true;
+  }
+
+  return rateLimit(merged);
 }
 
 const defaultLimiter = createLimiter({
