@@ -20,8 +20,7 @@ function createApiSession(username, clientVersion) {
     verified: false,
     created_via: username ? 'auth_login' : 'api_start',
     username: username || null,
-    // Account-login sessions are a 4.x flow, so default to the current API
-    // version (fully leaderboard-eligible) when no version is provided.
+    // Authenticated sessions default to the current API version so they remain leaderboard-eligible.
     client_version: clientVersion || config.apiVersion,
   };
   const saved = repo.saveSession(sessionId, session);

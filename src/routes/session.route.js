@@ -141,7 +141,6 @@ function register(app) {
 
     const nowIso = new Date().toISOString();
 
-    // ── Death submission ──
     if (died) {
       if (config.enableVocaguard) {
         if (!challengeId || !challengeProof) {
@@ -172,7 +171,7 @@ function register(app) {
         }
       }
 
-      // PoW passed — freeze session and auto-submit final score if authenticated
+      // Successful PoW freezes the session and permits authenticated auto-submit.
       const newLastFloorUpdate = floor > currentFloor ? nowIso : lastFloorUpdate;
 
       if (session.username && isLeaderboardEligible(session.client_version) && (floor > currentFloor || level > currentLevel)) {
@@ -194,7 +193,6 @@ function register(app) {
       return res.json({ status: 'updated', died: true });
     }
 
-    // ── Normal progress update (not dying) ──
     if (config.enableVocaguard) {
       try {
         validator.refreshChallengeForSession(sessionId);
@@ -206,7 +204,7 @@ function register(app) {
     const newLastFloorUpdate = floor > currentFloor ? nowIso : lastFloorUpdate;
     const newExpires = new Date(Date.now() + config.sessionTimeoutMinutes * 60000).toISOString();
 
-    // Progressive auto-submit for authenticated users (skip for old clients)
+    // Auto-submit changes only for authenticated, leaderboard-eligible sessions.
     if (session.username && isLeaderboardEligible(session.client_version) && (floor > currentFloor || level > currentLevel)) {
       try {
         await leaderboardService.submitScore(session, null, floor, level);

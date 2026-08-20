@@ -52,9 +52,7 @@ function register(app) {
         return res.status(400).json({ error: 'Session expired' });
       }
 
-      // Pre-4.0 clients may play but cannot submit to the
-      // leaderboard. Tell them to update their client instead of accepting
-      // the score or rejecting it as an anti-cheat failure.
+      // Legacy clients may play, but must update before leaderboard submission.
       if (!isLeaderboardEligible(session.client_version)) {
         return res.status(400).json({
           error: 'Leaderboard submissions require client version 4.0 or newer. Please update your client.',

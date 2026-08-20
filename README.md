@@ -1,41 +1,30 @@
 # TardQuest API
 
-Game API server for TardQuest, a JavaScript dungeon-crawler web game. Node.js/Express rewrite of the original Python/Flask server.
+Node.js/Express API server for the TardQuest dungeon-crawler. It is a rewrite of the original Python/Flask server and provides the public gameplay API.
 
 ## Quick start
 
 ```bash
 npm install
-npm run build
-node dist/public.js
+npm run build:public
+npm run start:public
 ```
 
-No configuration required — all defaults in `server.config.js`.
+The public server listens on `http://0.0.0.0:9601` by default. Configuration defaults are in `server.config.js`; environment overrides are loaded from `.env`.
 
-## Tests
+## Development
 
 ```bash
 npm test
+npm run build:public
 ```
 
-## Project layout
-
-```
-server.config.js         # All default settings
-src/
-├── entries/             # Entry points
-├── routes/              # Route handlers
-├── middleware/          # Express middleware
-├── services/            # Business logic
-├── db/                  # SQLite
-├── config.js            # Config loader (merges config + .env)
-└── utils/               # Logging, validation
-tests/
-├── unit/
-└── integration/
-docs/public/             # Public documentation
-```
+Use `npm run dev:public` for Node's watch mode.
 
 ## Documentation
 
-See [`docs/public/README.md`](./docs/public/README.md) for the full public API reference, configuration options, database schema, and security overview.
+See [docs/public/README.md](docs/public/README.md) for the public API, configuration, database schema, and security behavior.
+
+## License
+
+This project is released under the [MIT License](LICENSE). You may use, modify, and redistribute it under those terms.

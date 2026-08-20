@@ -1,6 +1,6 @@
 # TardQuest API
 
-Game API server for TardQuest, a JavaScript dungeon-crawler web game. Node.js/Express rewrite (v4) of the original Python/Flask server.
+Node.js/Express API server for the TardQuest dungeon-crawler. This document covers the public gameplay API.
 
 ---
 
@@ -11,6 +11,7 @@ Game API server for TardQuest, a JavaScript dungeon-crawler web game. Node.js/Ex
 - [API Reference](#api-reference)
 - [Database](#database)
 - [Security](#security)
+- [License](#license)
 
 ---
 
@@ -18,30 +19,36 @@ Game API server for TardQuest, a JavaScript dungeon-crawler web game. Node.js/Ex
 
 ### Requirements
 
-- Node.js 16+
-- SQLite database (auto-created)
+- Node.js 18+
+- SQLite database (created automatically)
 
 ### Setup
 
 ```bash
 npm install
 npm run build:public
-node dist/public.js
+npm run start:public
 ```
 
 Health check: `curl http://localhost:9601/status`
 
 ### Production
 
-Run behind a reverse proxy (IIS, nginx) handling HTTPS termination, IP forwarding, and protocol detection. The `/status` endpoint serves as a load-balancer health check.
+Run behind a reverse proxy (IIS, nginx, or equivalent) that handles HTTPS termination and forwarded headers. The `/status` endpoint can serve as a load-balancer health check.
 
-Log files are written to `logs/`. The native `better-sqlite3` dependency must be compiled for the target platform.
+The native `better-sqlite3` dependency must be compiled for the target platform. Runtime state is stored under `data/`, JSON state under `json/`, and logs under `logs/`.
+
+---
+
+## Internal profile
+
+An internal-only profile extends the public gameplay API with account authentication and launcher-manifest management. It is not part of the public release because those capabilities depend on private infrastructure and administrative authorization. Build and deployment details are intentionally omitted from this public documentation.
 
 ---
 
 ## Configuration
 
-No configuration required — all defaults work out of the box.
+The server works with the committed defaults. Copy the values you need into `.env` to override them at runtime.
 
 **`server.config.js`** (project root) contains all default settings. Edit it to adjust server, gameplay, or abuse thresholds.
 
@@ -57,7 +64,7 @@ No configuration required — all defaults work out of the box.
 | `sqliteDbPath` | `./data/tardquest.db` | SQLite database file |
 | `dbConnectionTimeoutSeconds` | `30` | Database connection timeout |
 | `enableVocaguard` | `true` | Master switch for anti-cheat |
-| `powDifficultyPrefixZeros` | `4` | Leading zero bits required (1–8) |
+| `powDifficultyPrefixZeros` | `4` | Leading zero hexadecimal characters required (1–8) |
 | `sessionTimeoutMinutes` | `43200` | Game session TTL (30 days) |
 | `sessionPurgeAgeDays` | `7` | Purge sessions older than this |
 | `backgroundWorkerSleepSeconds` | `86400` | Interval between purge runs (24h) |
@@ -73,10 +80,9 @@ No configuration required — all defaults work out of the box.
 | `authBackoffThreshold` | `3` | Failures before backoff starts |
 | `authBackoffBaseSeconds` | `5` | Initial backoff delay |
 | `authBackoffMaxSeconds` | `300` | Maximum backoff delay |
-| `corsOrigins` | *(6 origins)* | Allowed CORS origins |
-| `rateLimitStorageUri` | `memory://` | Rate-limit backend (`redis://` for multi-process) |
+| `corsOrigins` | `http://localhost:3000` | Allowed CORS origin list |
 
-**Default CORS origins:** `http://localhost:3000`
+Rate limiting currently uses the default in-memory store from `express-rate-limit`, so limits are local to each Node process.
 
 ### VocaGuard Thresholds (in `vocaguard.service.js`)
 
@@ -92,21 +98,13 @@ No configuration required — all defaults work out of the box.
 
 ## API Reference
 
-All endpoints return JSON. Standard HTTP status codes: 200 (success), 400 (bad request), 401 (unauthorized), 429 (rate-limited), 500 (server error).
+All endpoints return JSON. Common status codes are 200 (success), 201 (created), 400 (bad request), 401 (unauthorized), 403 (forbidden), 429 (rate-limited), 500 (server error), and 503 (dependency unavailable).
 
-All protected endpoints accept a session ID via the **`X-Session-Id` HTTP header**.
+Session identifiers are supplied per endpoint: most POST routes use a JSON `session_id`, while pigeon inventory and the GET murder-statistics route use `X-Session-Id`.
 
-### Python-compatible `/api` prefix
+### `/api` compatibility prefix
 
-Every route is also served under the `/api` prefix for drop-in compatibility with the production (Python) server and the TardQuest Online client/gameServer:
-
-- `POST /api/auth/login`, `/api/auth/online/login`, `/api/auth/online/verify`, etc.
-- `POST /api/start`, `/api/update`
-- `GET|POST /api/leaderboard`
-- `GET|POST /api/pigeon/*`, `GET /api/abuse`
-- `GET|POST /api/launcher-win64`, `GET /api/launcher-linux`
-
-So both `POST /start` and `POST /api/start` work, and the TQO gameServer can verify bearer tokens against `POST /api/auth/online/verify`.
+Every registered public route is also mounted under `/api`. For example, both `POST /start` and `POST /api/start` work.
 
 ### `GET /status`
 
@@ -122,15 +120,15 @@ Create a new game session.
 
 **Response:** `{ "session_id": "uuid", "server_version": "x.y.z" }`
 
-Returns a PoW challenge (challenge_id, challenge_salt, challenge_difficulty) when VocaGuard is enabled.
+Returns `challenge_id`, `challenge_salt`, and `challenge_difficulty` when VocaGuard is enabled. The challenge is used for guest leaderboard submissions and death submissions.
 
 **Client version compatibility:** clients `>= minSupportedClientVersion` (default `3.0.251113`) are accepted. Legacy 3.x clients can play, update progress, use pigeons, and fetch the leaderboard (gravestones), but **cannot submit to the leaderboard** — `POST /leaderboard` returns `400` with an `update_required` error telling them to update their client. Clients below `minSupportedClientVersion` are rejected outright.
 
 ### `POST /update`
 
-Update session progress (floor, level, EXP).
+Update session progress (floor, level, EXP). Send `session_id`, `floor`, `level`, and `exp` in the JSON body. Set `died` to `true` for a final death submission and include the PoW challenge fields when VocaGuard is enabled.
 
-**Headers:** `X-Session-Id: <session_id>`
+**Body:** `{ "session_id": "uuid", "floor": 2, "level": 1, "exp": 50 }`
 
 **Rate limit:** 10 per minute.
 
@@ -142,9 +140,9 @@ Retrieve current leaderboard entries sorted by floor DESC, level DESC.
 
 Submit a leaderboard entry. Validates progress against VocaGuard session and verifies PoW.
 
-**Headers:** `X-Session-Id: <session_id>`
+**Body:** `{ "session_id": "uuid", "name": "PLAYER", "floor": 2, "level": 1 }`
 
-**Name validation:** 1–5 alphanumeric characters, no spaces.
+Guest names are limited to five alphanumeric characters or spaces.
 
 ### `POST /pigeon/purchase`
 
@@ -152,15 +150,23 @@ Purchase a carrier pigeon. Limited to `maxPigeonsPerSession` (default 20).
 
 **Rate limit:** 20 per hour.
 
+### `GET /pigeon/inventory`
+
+Return the current carrier-pigeon count. Requires `X-Session-Id: <session_id>`.
+
 ### `POST /pigeon/send`
 
 Send a pigeon message. Consumes one carrier pigeon from inventory.
 
-**Message sanitization:** NFC normalization, HTML entity/tag removal, protocol URL stripping, zero-width/control character removal, character whitelist, length cap (420 chars), repeated punctuation collapse.
+**Message sanitization:** NFC normalization, HTML entity/tag removal, protocol URL stripping, zero-width/control-character removal, character whitelist, length cap (420 chars), and repeated-punctuation collapse.
+
+**Rate limit:** 5 per minute.
 
 ### `POST /pigeon/delivery`
 
 Retrieve a pending pigeon message for the session. Weighted random selection (floor proximity, message age, repeat-sender penalty, jitter).
+
+**Rate limit:** 5 per minute.
 
 ### `GET /pigeon/murder`
 
@@ -180,19 +186,16 @@ Admin endpoint. Requires whitelisted IP (see `json/whitelist.json`). Returns fla
 
 ## Database
 
-The application uses **SQLite** via `better-sqlite3` for storing game data:
+The public gameplay profile uses **SQLite** via `better-sqlite3`:
 
 | Table | Purpose |
 |-------|---------|
 | `sessions` | Player game sessions |
 | `leaderboard` | Submitted scores |
-| `pigeon_messages` | Player-to-player messages |
-| `pigeon_inventory` | Carrier pigeon ownership |
-| `murder_stats` | Pigeon murder tracking |
-| `vocaguard_profiles` | Behavioral fingerprint data |
-| `pow_challenges` | Proof-of-Work challenge state |
+| `pigeons` | Player-to-player messages and delivery state |
+| `pigeon_murders` | Pigeon murder reports |
 
-The database is auto-created at startup using `CREATE TABLE IF NOT EXISTS`. No migrations are needed.
+The database and tables are created at startup with `CREATE TABLE IF NOT EXISTS`. Existing `sessions` tables receive the `client_version` and `died_at` columns when needed.
 
 **Pragmas:** `journal_mode = WAL`, `synchronous = NORMAL`, `foreign_keys = ON`
 
@@ -204,14 +207,14 @@ The database is auto-created at startup using `CREATE TABLE IF NOT EXISTS`. No m
 
 Three-layer built-in protection:
 
-1. **Proof of Work** — SHA-256 challenge for new sessions; find a nonce producing N leading zero bits
+1. **Proof of Work** — SHA-256 challenge for new sessions; find a nonce producing N leading zero hexadecimal characters
 2. **Progress Validation** — Rejects floor/level/EXP regression, floor skips, speed hacks, level-jumps, insufficient EXP, and level-up spam
 3. **Behavioral Fingerprinting** — Tracks update timing, floor durations, level-up intervals; computes coefficient of variation to detect bot-like mechanical patterns
 
 ### Input Sanitization
 
-- **Pigeon messages** — HTML entity decoding, protocol URL stripping, zero-width Unicode removal, configurable character whitelist
-- **Leaderboard names** — HTML entity decoding, character restriction `[A-Za-z0-9_ ]`, XSS keyword blacklist
+- **Pigeon messages** — HTML entity/tag removal, protocol URL stripping, zero-width Unicode removal, configurable character whitelist
+- **Leaderboard names** — entity/tag removal, character restriction, and dangerous-term filtering
 - **HTTP body limit** — 100kb JSON/URL-encoded payload cap
 
 ### Additional Protections
@@ -223,3 +226,9 @@ Three-layer built-in protection:
 - **IP flagging** — Automatic blocking after abuse thresholds
 - **Auth backoff** — Exponential backoff on repeated auth failures
 - **Audit logging** — All requests logged with IP, method, path, status, user-agent, referer; sensitive fields redacted
+
+---
+
+## License
+
+This project is licensed under the [MIT License](../../LICENSE). You may use, modify, and redistribute it under those terms.

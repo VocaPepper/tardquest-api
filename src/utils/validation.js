@@ -29,21 +29,14 @@ function versionGt(a, b) {
   return a.patch > b.patch;
 }
 
-// Compare major.minor only, ignoring the patch component.
-// Patch releases (e.g. 4.0.2606 vs 4.0.2608) are not breaking changes, so a
-// 4.0.x client should never be locked out of features by a newer 4.0.y patch.
+// Compare major.minor so patch releases do not block compatible clients.
 function versionGteMajorMinor(a, b) {
   if (!a || !b) return false;
   if (a.major !== b.major) return a.major > b.major;
   return a.minor >= b.minor;
 }
 
-/**
- * Validate that a client version is new enough to connect at all.
- * Clients must be >= minSupportedClientVersion; anything older is rejected.
- * Clients between minSupportedClientVersion and minClientVersion may still play
- * (pigeons, gravestones, progress) but cannot use leaderboard features.
- */
+/** Reject clients below minSupportedClientVersion; supported legacy clients cannot submit scores. */
 function validateClientVersion(clientVersion) {
   const clientTuple = parseVersion(clientVersion);
   const serverTuple = parseVersion(config.apiVersion);
@@ -58,17 +51,13 @@ function validateClientVersion(clientVersion) {
   return { valid: true };
 }
 
-/**
- * True when a session's client version is new enough for full features,
- * including leaderboard submissions.
- */
+/** Whether a session may submit leaderboard scores. */
 function isLeaderboardEligible(clientVersion) {
   if (!clientVersion) return true;
   const clientTuple = parseVersion(clientVersion);
   const minLeaderboardTuple = parseVersion(config.minClientVersion);
   if (!clientTuple || !minLeaderboardTuple) return false;
-  // Compare major.minor only so patch-level server bumps (e.g. 4.0.2608) don't
-  // lock out earlier 4.0.x clients.
+  // Patch-level server bumps do not block compatible clients.
   return versionGteMajorMinor(clientTuple, minLeaderboardTuple);
 }
 

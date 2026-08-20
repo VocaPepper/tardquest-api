@@ -35,7 +35,7 @@ node.pragma('journal_mode = WAL');
 node.pragma('synchronous = NORMAL');
 node.pragma('foreign_keys = ON');
 
-// Recreate the Node schema (same as connection.js initDb)
+// Keep the schema aligned with src/db/connection.js.
 node.exec(`
   CREATE TABLE IF NOT EXISTS leaderboard (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,7 +96,6 @@ node.exec(`
   CREATE INDEX IF NOT EXISTS idx_pigeons_undelivered ON pigeons (delivered, from_session);
 `);
 
-// Check which columns exist in the legacy sessions table
 const legacySessionCols = legacy.prepare('PRAGMA table_info(sessions)').all();
 const legacyColNames = legacySessionCols.map(c => c.name);
 console.log('Legacy sessions columns:', legacyColNames.join(', '));
@@ -104,7 +103,7 @@ console.log('Legacy sessions columns:', legacyColNames.join(', '));
 const hasUsername = legacyColNames.includes('username');
 const hasBoundIp = legacyColNames.includes('bound_ip');
 
-// ----- Helper to safely read all rows from a legacy table (may not exist) -----
+// Missing legacy tables are skipped.
 function getLegacyRows(table, sql) {
   try {
     return legacy.prepare(sql || `SELECT * FROM ${table}`).all();
@@ -114,7 +113,6 @@ function getLegacyRows(table, sql) {
   }
 }
 
-// ----- Migrate leaderboard -----
 const leaderboardRows = getLegacyRows('leaderboard', 'SELECT name, floor, level FROM leaderboard ORDER BY id');
 if (leaderboardRows && leaderboardRows.length > 0) {
   node.prepare('DELETE FROM leaderboard').run();
@@ -128,7 +126,6 @@ if (leaderboardRows && leaderboardRows.length > 0) {
   console.log('Leaderboard: empty');
 }
 
-// ----- Migrate sessions -----
 const sessionRows = getLegacyRows('sessions', hasUsername
   ? `SELECT session_id, floor, level, COALESCE(exp, 0) AS exp,
             expires, created, inv,
@@ -178,7 +175,6 @@ if (sessionRows && sessionRows.length > 0) {
   console.log('Sessions: empty');
 }
 
-// ----- Migrate pigeons -----
 const pigeonRows = getLegacyRows('pigeons');
 if (pigeonRows && pigeonRows.length > 0) {
   node.prepare('DELETE FROM pigeons').run();
@@ -200,7 +196,6 @@ if (pigeonRows && pigeonRows.length > 0) {
   console.log('Pigeons: empty');
 }
 
-// ----- Migrate pigeon_murders -----
 const murderRows = getLegacyRows('pigeon_murders');
 if (murderRows && murderRows.length > 0) {
   node.prepare('DELETE FROM pigeon_murders').run();
@@ -219,7 +214,6 @@ if (murderRows && murderRows.length > 0) {
   console.log('Pigeon murders: empty');
 }
 
-// ----- Migrate online_sessions -----
 const onlineRows = getLegacyRows('online_sessions');
 if (onlineRows && onlineRows.length > 0) {
   node.prepare('DELETE FROM online_sessions').run();

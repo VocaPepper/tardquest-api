@@ -2,8 +2,6 @@ const { getDbConnection } = require('./connection');
 const config = require('../config');
 const logger = require('../utils/logger');
 
-// --- Sessions ---
-
 function saveSession(sessionId, session) {
   try {
     const db = getDbConnection();
@@ -140,8 +138,6 @@ function purgeOldSessions() {
   }
 }
 
-// --- Leaderboard ---
-
 function getLeaderboard() {
   try {
     const db = getDbConnection();
@@ -197,8 +193,6 @@ function deleteLeaderboardEntryByName(name) {
     return false;
   }
 }
-
-// --- Pigeons ---
 
 function getPendingPigeonForDelivery(recipientFloor, recipientSessionId, excludeRecentSender) {
   try {
@@ -363,8 +357,6 @@ function countTotalPigeons() {
   }
 }
 
-// --- Pigeon Murders ---
-
 function recordPigeonMurder(sessionId, pigeonId) {
   try {
     const db = getDbConnection();
@@ -396,8 +388,6 @@ function getPigeonMurderTotals(sessionId) {
     return { total_murdered: 0, unique_players: 0, session_murdered: 0 };
   }
 }
-
-// --- Online Auth Sessions ---
 
 function createOnlineAuthSession(username, sourceIp, token, expiresIso, nowIso) {
   try {
@@ -434,8 +424,6 @@ function verifyOnlineAuthToken(token) {
     return { valid: false, error: 'Online auth service unavailable' };
   }
 }
-
-// --- Helpers ---
 
 function safeJsonParse(str, fallback) {
   try { return JSON.parse(str); } catch (e) { return fallback; }

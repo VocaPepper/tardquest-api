@@ -25,10 +25,8 @@ function envList(key, fallback) {
   return v.split(',').map(s => s.trim()).filter(Boolean);
 }
 
-// Merge private config on top of public defaults when profile is "private".
-// Use a static require() path so esbuild can bundle it at build time.
-// The try/catch handles the case where src/private/ doesn't exist
-// (e.g. public-only checkout or CI build without private sources).
+// Merge private defaults when requested; the static require keeps esbuild bundling
+// and public-only builds working when private sources are absent.
 let merged = { ...defaults };
 if ((process.env.API_PROFILE || defaults.profile).toLowerCase() === 'private') {
   try {
@@ -49,9 +47,8 @@ const config = {
   // Whitelisted TQO account usernames allowed to manage the launcher manifest
   manifestoAdmins: envList('MANIFESTO_ADMINS', merged.manifestoAdmins),
 
-  // Deployment-specific overrides (fallbacks from merged defaults)
   profile: (process.env.API_PROFILE || merged.profile).toLowerCase(),
-  // DEPLOY_MODE: 'prod' enforces rate limits, 'dev' unlocks them. Defaults to 'prod'.
+  // 'prod' enforces rate limits; 'dev' skips them. Defaults to 'prod'.
   deployMode: (process.env.DEPLOY_MODE || merged.deployMode || 'prod').toLowerCase(),
   host: process.env.HOST || merged.host,
   port: envInt('PORT', merged.port),
@@ -77,7 +74,6 @@ const config = {
 
   rateLimitStorageUri: process.env.RATE_LIMIT_STORAGE_URI || merged.rateLimitStorageUri,
 
-  // Resolve relative paths to absolute
   stateDir: path.resolve(ROOT, merged.stateDir),
   logDir: path.resolve(ROOT, merged.logDir),
 };

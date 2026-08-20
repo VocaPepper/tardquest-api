@@ -85,18 +85,17 @@ function initDb(database) {
     CREATE INDEX IF NOT EXISTS idx_pigeons_undelivered ON pigeons (delivered, from_session);
   `);
 
-  // Migrate existing databases: add died_at column if missing
+  // Add columns for existing databases; duplicate-column errors are expected.
   try {
     database.exec('ALTER TABLE sessions ADD COLUMN died_at TEXT DEFAULT NULL');
   } catch (e) {
-    // Column already exists — ignore
+    // Already migrated.
   }
 
-  // Migrate existing databases: add client_version column if missing
   try {
     database.exec('ALTER TABLE sessions ADD COLUMN client_version TEXT');
   } catch (e) {
-    // Column already exists — ignore
+    // Already migrated.
   }
 }
 
