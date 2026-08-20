@@ -2,7 +2,7 @@ const repo = require('../db/sqlite.repository');
 const abuse = require('../services/abuse.service');
 const leaderboardService = require('../services/leaderboard.service');
 const { validator } = require('../services/vocaguard.service');
-const { isLeaderboardEligible } = require('../utils/validation');
+const { isLeaderboardEligible, parseInteger } = require('../utils/validation');
 const config = require('../config');
 const logger = require('../utils/logger');
 
@@ -35,6 +35,11 @@ function register(app) {
       if (data.floor === undefined || data.level === undefined) {
         return res.status(400).json({ error: 'Missing required fields: floor, level' });
       }
+      const submittedFloor = parseInteger(data.floor);
+      const submittedLevel = parseInteger(data.level);
+      if (submittedFloor === null || submittedLevel === null) {
+        return res.status(400).json({ error: 'Floor and level must be valid integers' });
+      }
 
       const session = repo.getSessionById(data.session_id);
       if (!session) {
@@ -65,7 +70,7 @@ function register(app) {
       if (config.enableVocaguard) {
         const vResult = validator.validateSubmission(
           session.floor, session.level,
-          parseInt(data.floor, 10), parseInt(data.level, 10),
+          submittedFloor, submittedLevel,
         );
         if (!vResult.valid) {
           abuse.recordAbuse('validate_mismatch', req.ip, data.session_id, {
@@ -97,17 +102,25 @@ function register(app) {
           repo.updateSession(data.session_id, {
             expires: new Date(Date.now() + config.sessionTimeoutMinutes * 60000).toISOString(),
           });
-        } else {
-          repo.deleteSession(data.session_id);
         }
       }
 
       const result = await leaderboardService.submitScore(
-        session, data.name, parseInt(data.floor, 10), parseInt(data.level, 10),
+        session, data.name, submittedFloor, submittedLevel,
       );
       if (result.error) {
+        if (!session.username && config.enableVocaguard) {
+          const challenge = validator.generateChallenge(data.session_id);
+          return res.status(400).json({
+            error: result.error,
+            challenge_id: challenge.challengeId,
+            challenge_salt: challenge.challengeSalt,
+            challenge_difficulty: config.powDifficultyPrefixZeros,
+          });
+        }
         return res.status(400).json({ error: result.error });
       }
+      if (!session.username) repo.deleteSession(data.session_id);
       res.json({ message: 'Leaderboard updated successfully', data: result.data });
     } catch (e) {
       logger.logError('leaderboard_post', e, { request_data: JSON.stringify(req.body || {}) });

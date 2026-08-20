@@ -334,6 +334,65 @@ function insertPigeon(pigeon) {
   }
 }
 
+function storePigeon(pigeon) {
+  try {
+    const db = getDbConnection();
+    return db.transaction(() => {
+      const session = db.prepare('SELECT inv FROM sessions WHERE session_id = ?').get(pigeon.from_session);
+      if (!session) return { error: 'Invalid session' };
+
+      const inventory = safeJsonParse(session.inv, {});
+      const carrierPigeons = Number(inventory.carrierPigeon);
+      if (!Number.isFinite(carrierPigeons) || carrierPigeons <= 0) {
+        return { error: 'No carrier pigeon in inventory' };
+      }
+
+      const pending = db.prepare(
+        'SELECT COUNT(*) AS cnt FROM pigeons WHERE from_session = ? AND delivered = 0'
+      ).get(pigeon.from_session).cnt;
+      if (pending >= config.maxPigeonsPerSession) {
+        return { error: 'Session pigeon message limit reached' };
+      }
+
+      const duplicate = db.prepare(
+        'SELECT id FROM pigeons WHERE from_session = ? AND text = ? AND delivered = 0 LIMIT 1'
+      ).get(pigeon.from_session, pigeon.text);
+      if (duplicate) return { error: 'Duplicate message' };
+
+      const newCount = carrierPigeons - 1;
+      const updated = db.prepare('UPDATE sessions SET inv = ? WHERE session_id = ?').run(
+        JSON.stringify({ ...inventory, carrierPigeon: newCount }),
+        pigeon.from_session,
+      );
+      if (updated.changes === 0) return { error: 'Internal server error', internal: true };
+
+      db.prepare(`
+        INSERT INTO pigeons (id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        pigeon.id, pigeon.text, pigeon.from_session, pigeon.from_floor, pigeon.from_level,
+        pigeon.from_verified ? 1 : 0, pigeon.created, 0, null, null,
+      );
+
+      const queueLengthPending = db.prepare(
+        'SELECT COUNT(*) AS cnt FROM pigeons WHERE from_session = ? AND delivered = 0'
+      ).get(pigeon.from_session).cnt;
+      const queueLengthTotal = db.prepare('SELECT COUNT(*) AS cnt FROM pigeons').get().cnt;
+
+      return {
+        stored: true,
+        queue_length_pending: queueLengthPending,
+        queue_length_total: queueLengthTotal,
+        sanitized_text: pigeon.text,
+        carrierPigeon_remaining: newCount,
+      };
+    })();
+  } catch (e) {
+    logger.logError('storePigeon', e, { pigeonId: pigeon.id });
+    return { error: 'Internal server error', internal: true };
+  }
+}
+
 function checkDuplicatePigeonMessage(sessionId, text) {
   try {
     const db = getDbConnection();
@@ -476,6 +535,7 @@ module.exports = {
   getPendingPigeonCount,
   getDeliverablePigeonCount,
   insertPigeon,
+  storePigeon,
   checkDuplicatePigeonMessage,
   countTotalPigeons,
   recordPigeonMurder,

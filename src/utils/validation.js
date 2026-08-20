@@ -3,16 +3,19 @@ const config = require('../config');
 const logger = require('../utils/logger');
 
 function parseVersion(versionStr) {
-  try {
-    const parts = versionStr.split('.');
-    const major = parseInt(parts[0], 10);
-    const minor = parseInt(parts[1], 10);
-    const patch = parseInt(parts[2], 10);
-    if (isNaN(major) || isNaN(minor) || isNaN(patch)) return null;
-    return { major, minor, patch };
-  } catch (e) {
-    return null;
-  }
+  if (typeof versionStr !== 'string') return null;
+  const parts = versionStr.split('.');
+  if (parts.length !== 3 || parts.some(part => !/^\d+$/.test(part))) return null;
+  const [major, minor, patch] = parts.map(Number);
+  if (![major, minor, patch].every(Number.isSafeInteger)) return null;
+  return { major, minor, patch };
+}
+
+function parseInteger(value) {
+  if (typeof value === 'number') return Number.isSafeInteger(value) ? value : null;
+  if (typeof value !== 'string' || !/^-?\d+$/.test(value.trim())) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 function versionGte(a, b) {
@@ -61,4 +64,4 @@ function isLeaderboardEligible(clientVersion) {
   return versionGteMajorMinor(clientTuple, minLeaderboardTuple);
 }
 
-module.exports = { parseVersion, versionGte, versionGt, versionGteMajorMinor, validateClientVersion, isLeaderboardEligible };
+module.exports = { parseVersion, parseInteger, versionGte, versionGt, versionGteMajorMinor, validateClientVersion, isLeaderboardEligible };

@@ -1,6 +1,7 @@
 const repo = require('../db/sqlite.repository');
 const abuse = require('../services/abuse.service');
 const pigeonService = require('../services/pigeon.service');
+const config = require('../config');
 const { limiter } = require('../middleware/rateLimiter');
 const logger = require('../utils/logger');
 
@@ -59,17 +60,18 @@ function register(app) {
 
     pigeonService.ensureInventory(session);
     const cur = session.inv.carrierPigeon;
-    const maxPigeons = require('../config').maxPigeonsPerSession;
+    const maxPigeons = config.maxPigeonsPerSession;
     if (cur >= maxPigeons) {
       abuse.recordAbuse('pigeon_limit_reached', req.ip, sessionId);
       return res.status(400).json({ error: "You've had enough pigeons for today!", carrierPigeon: cur });
     }
 
     const newCount = cur + 1;
-    repo.updateSession(sessionId, {
-      expires: new Date(Date.now() + 43200 * 60000).toISOString(),
+    const saved = repo.updateSession(sessionId, {
+      expires: new Date(Date.now() + config.sessionTimeoutMinutes * 60000).toISOString(),
       inv: { ...session.inv, carrierPigeon: newCount },
     });
+    if (!saved) return res.status(500).json({ error: 'Failed to update session' });
 
     res.json({
       purchased: true,
@@ -94,6 +96,9 @@ function register(app) {
 
     const result = pigeonService.sendPigeon(sessionId, rawText);
     if (result.error) {
+      if (result.internal) {
+        return res.status(500).json({ error: 'Internal server error' });
+      }
       const metric =
         result.error === 'Invalid session' ? 'invalid_session' :
         result.error === 'Session expired' ? 'session_expired' :

@@ -68,6 +68,13 @@ describe('VocaGuardValidator', () => {
       const result = validator.validateProgressUpdate(1, 1, 0, 1, 2, 30, 's1', null);
       expect(result.valid).to.be.true;
     });
+
+    it('rejects high behavioral suspicion scores', () => {
+      validator._fingerprinter.analyze = () => ({ score: 0.8, details: {} });
+      const result = validator.validateProgressUpdate(1, 1, 0, 1, 1, 0, 's1', null);
+      expect(result.valid).to.be.false;
+      expect(result.error).to.include('Unusual activity');
+    });
   });
 
   describe('validateSubmission', () => {

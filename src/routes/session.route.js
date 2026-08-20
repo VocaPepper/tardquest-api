@@ -4,7 +4,7 @@ const repo = require('../db/sqlite.repository');
 const abuse = require('../services/abuse.service');
 const sessionService = require('../services/session.service');
 const leaderboardService = require('../services/leaderboard.service');
-const { validateClientVersion, isLeaderboardEligible } = require('../utils/validation');
+const { parseInteger, validateClientVersion, isLeaderboardEligible } = require('../utils/validation');
 const { validator } = require('../services/vocaguard.service');
 const { limiter } = require('../middleware/rateLimiter');
 const logger = require('../utils/logger');
@@ -78,13 +78,10 @@ function register(app) {
       return res.status(429).json({ error: 'Temporarily blocked due to abuse', until: (info || {}).until });
     }
 
-    let floor, level, exp;
-    try {
-      floor = parseInt(data.floor, 10);
-      level = parseInt(data.level, 10);
-      exp = parseInt(data.exp, 10);
-      if (isNaN(floor) || isNaN(level) || isNaN(exp)) throw new Error('NaN');
-    } catch (e) {
+    const floor = parseInteger(data.floor);
+    const level = parseInteger(data.level);
+    const exp = parseInteger(data.exp);
+    if (floor === null || level === null || exp === null) {
       abuse.recordAbuse('invalid_progress_type', req.ip, sessionId, {
         floor_val: data.floor, level_val: data.level, exp_val: data.exp,
       });
@@ -182,13 +179,14 @@ function register(app) {
         }
       }
 
-      repo.updateSession(sessionId, {
+      const saved = repo.updateSession(sessionId, {
         floor,
         level,
         exp,
         last_floor_update: newLastFloorUpdate,
         died_at: nowIso,
       });
+      if (!saved) return res.status(500).json({ error: 'Failed to update session' });
 
       return res.json({ status: 'updated', died: true });
     }
@@ -213,13 +211,14 @@ function register(app) {
       }
     }
 
-    repo.updateSession(sessionId, {
+    const saved = repo.updateSession(sessionId, {
       floor,
       level,
       exp,
       expires: newExpires,
       last_floor_update: newLastFloorUpdate,
     });
+    if (!saved) return res.status(500).json({ error: 'Failed to update session' });
 
     res.json({ status: 'updated' });
   });

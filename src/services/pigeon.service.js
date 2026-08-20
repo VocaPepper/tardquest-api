@@ -58,19 +58,6 @@ function sendPigeon(sessionId, rawText) {
     return { error: 'Message rejected (empty/invalid after sanitation)' };
   }
 
-  if (repo.checkDuplicatePigeonMessage(sessionId, text)) {
-    return { error: 'Duplicate message' };
-  }
-
-  if (repo.getPendingPigeonCount(sessionId) >= config.maxPigeonsPerSession) {
-    return { error: 'Session pigeon message limit reached' };
-  }
-
-  const newCount = session.inv.carrierPigeon - 1;
-  repo.updateSession(sessionId, {
-    inv: { ...session.inv, carrierPigeon: newCount },
-  });
-
   const pigeon = {
     id: crypto.randomUUID(),
     text,
@@ -80,18 +67,7 @@ function sendPigeon(sessionId, rawText) {
     from_verified: !!session.verified,
     created: new Date().toISOString(),
   };
-  repo.insertPigeon(pigeon);
-
-  const pending = repo.getPendingPigeonCount(sessionId);
-  const total = repo.countTotalPigeons();
-
-  return {
-    stored: true,
-    queue_length_pending: pending,
-    queue_length_total: total,
-    sanitized_text: text,
-    carrierPigeon_remaining: newCount,
-  };
+  return repo.storePigeon(pigeon);
 }
 
 function deliverPigeon(sessionId) {

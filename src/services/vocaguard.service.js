@@ -223,7 +223,7 @@ class VocaGuardValidator {
 
     this._fingerprinter.recordUpdate(sessionId, currentFloor, currentLevel, newFloor, newLevel);
     const { score, details } = this._fingerprinter.analyze(sessionId);
-    if (score >= BehavioralFingerprinter.prototype.SUSPICION_HARD_THRESHOLD) {
+    if (score >= this._fingerprinter.SUSPICION_HARD_THRESHOLD) {
       return { valid: false, error: 'Unusual activity pattern detected', abuse: { cheat_type: 'behavioral_anomaly', suspicion_score: score, ...details } };
     }
 
@@ -336,7 +336,7 @@ class VocaGuardValidator {
 
     count += this._fingerprinter.cleanupStale();
 
-    const levelupCutoff = Date.now() / 1000 - BehavioralFingerprinter.prototype.PROFILE_TTL_SECONDS;
+    const levelupCutoff = Date.now() / 1000 - this._fingerprinter.PROFILE_TTL_SECONDS;
     for (const [sid, timestamps] of this._levelupHistory) {
       if (timestamps.length === 0 || Math.max(...timestamps) < levelupCutoff) {
         this._levelupHistory.delete(sid);

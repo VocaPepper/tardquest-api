@@ -71,6 +71,4 @@ module.exports = {
     'http://localhost:3000',
   ],
 
-  // ── Rate Limiting ────────────────────────────────────────
-  rateLimitStorageUri: 'memory://',
 };

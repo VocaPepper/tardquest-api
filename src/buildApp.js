@@ -2,6 +2,7 @@ const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
 const config = require('./config');
+const { defaultLimiter } = require('./middleware/rateLimiter');
 
 function buildApp(routeModules) {
   const app = express();
@@ -16,6 +17,7 @@ function buildApp(routeModules) {
 
   app.use(express.json({ limit: config.bodyLimit }));
   app.use(express.urlencoded({ limit: config.bodyLimit, extended: false }));
+  app.use(defaultLimiter);
 
   const logger = require('./utils/logger');
   app.use((req, res, next) => {

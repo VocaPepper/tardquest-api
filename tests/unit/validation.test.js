@@ -1,5 +1,5 @@
 const { expect } = require('chai');
-const { parseVersion, versionGte, validateClientVersion } = require('../../src/utils/validation');
+const { parseVersion, parseInteger, versionGte, validateClientVersion } = require('../../src/utils/validation');
 
 describe('validation utils', () => {
   describe('parseVersion', () => {
@@ -10,6 +10,16 @@ describe('validation utils', () => {
     it('returns null for invalid versions', () => {
       expect(parseVersion('abc')).to.be.null;
       expect(parseVersion('1.2')).to.be.null;
+      expect(parseVersion('1.2.3suffix')).to.be.null;
+    });
+  });
+
+  describe('parseInteger', () => {
+    it('accepts integers and rejects malformed values', () => {
+      expect(parseInteger(12)).to.equal(12);
+      expect(parseInteger('12')).to.equal(12);
+      expect(parseInteger('12suffix')).to.be.null;
+      expect(parseInteger(1.5)).to.be.null;
     });
   });
 

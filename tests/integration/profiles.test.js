@@ -79,6 +79,13 @@ describe('Private API Integration', () => {
   });
 
   describe('auth routes ARE present', () => {
+    it('rejects malformed field types without crashing', async () => {
+      const res = await supertest(app)
+        .post('/auth/login')
+        .send({ username: {}, password: 'password' });
+      expect(res.status).to.equal(400);
+    });
+
     it('returns 400 (not 404) for /auth/login with missing fields', async () => {
       const res = await supertest(app).post('/auth/login').send({});
       expect(res.status).to.not.equal(404);

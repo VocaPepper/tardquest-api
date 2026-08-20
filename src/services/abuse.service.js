@@ -57,7 +57,6 @@ function isFlagged(ip) {
 
 function recordAbuse(metric, ip, sessionId, extra) {
   const loggerModule = require('../utils/logger');
-  const vocaguardEvents = loggerModule.loadVocaguardEvents(config.abuseEventWindowSeconds);
 
   const event = { ip: ip || 'unknown', metric };
   event.ts = Math.floor(Date.now() / 1000);
@@ -65,6 +64,7 @@ function recordAbuse(metric, ip, sessionId, extra) {
   if (extra) event.extra = { ...extra };
   loggerModule.logVocaguardEvent(event);
 
+  const vocaguardEvents = loggerModule.loadVocaguardEvents(config.abuseEventWindowSeconds);
   const ipEvents = vocaguardEvents.filter(e => e.ip === (ip || 'unknown'));
   const counts = {};
   for (const e of ipEvents) {

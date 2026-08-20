@@ -72,8 +72,6 @@ const config = {
 
   corsOrigins: merged.corsOrigins,
 
-  rateLimitStorageUri: process.env.RATE_LIMIT_STORAGE_URI || merged.rateLimitStorageUri,
-
   stateDir: path.resolve(ROOT, merged.stateDir),
   logDir: path.resolve(ROOT, merged.logDir),
 };
