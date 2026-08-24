@@ -115,13 +115,27 @@ function getLegacyRows(table, sql) {
 
 const leaderboardRows = getLegacyRows('leaderboard', 'SELECT name, floor, level FROM leaderboard ORDER BY id');
 if (leaderboardRows && leaderboardRows.length > 0) {
+  const mergedLeaderboard = new Map();
+  for (const row of leaderboardRows) {
+    const nameKey = String(row.name).toUpperCase();
+    const current = mergedLeaderboard.get(nameKey);
+    if (!current || Number(row.floor) > Number(current.floor) ||
+        (Number(row.floor) === Number(current.floor) && Number(row.level) > Number(current.level))) {
+      mergedLeaderboard.set(nameKey, row);
+    }
+  }
+  const mergedLeaderboardRows = [...mergedLeaderboard.values()];
+
   node.prepare('DELETE FROM leaderboard').run();
   const insertLB = node.prepare('INSERT INTO leaderboard (name, floor, level) VALUES (?, ?, ?)');
   const txLB = node.transaction(() => {
-    for (const r of leaderboardRows) insertLB.run(r.name, r.floor, r.level);
+    for (const r of mergedLeaderboardRows) insertLB.run(r.name, r.floor, r.level);
   });
   txLB();
-  console.log(`Migrated ${leaderboardRows.length} leaderboard entries`);
+  console.log(`Migrated ${mergedLeaderboardRows.length} leaderboard entries` +
+    (mergedLeaderboardRows.length < leaderboardRows.length
+      ? ` (merged ${leaderboardRows.length - mergedLeaderboardRows.length} duplicates)`
+      : ''));
 } else {
   console.log('Leaderboard: empty');
 }
