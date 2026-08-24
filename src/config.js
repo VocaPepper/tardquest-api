@@ -44,9 +44,6 @@ const config = {
   accountDbUrl: process.env.TQ_DATABASE_URL || '',
   recoveryCodePepper: process.env.RECOVERY_CODE_PEPPER || '',
 
-  // Whitelisted TQO account usernames allowed to manage the launcher manifest
-  manifestoAdmins: envList('MANIFESTO_ADMINS', merged.manifestoAdmins),
-
   profile: (process.env.API_PROFILE || merged.profile).toLowerCase(),
   // 'prod' enforces rate limits; 'dev' skips them. Defaults to 'prod'.
   deployMode: (process.env.DEPLOY_MODE || merged.deployMode || 'prod').toLowerCase(),

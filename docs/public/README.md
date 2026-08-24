@@ -42,7 +42,7 @@ The native `better-sqlite3` dependency must be compiled for the target platform.
 
 ## Internal profile
 
-An internal-only profile extends the public gameplay API with account authentication and launcher-manifest management. It is not part of the public release because those capabilities depend on private infrastructure and administrative authorization. Build and deployment details are intentionally omitted from this public documentation.
+An internal-only profile extends the public gameplay API with account authentication and (deprecated) launcher-manifest endpoints. It is not part of the public release because those capabilities depend on private infrastructure and administrative authorization. Build and deployment details are intentionally omitted from this public documentation.
 
 ---
 

@@ -1,8 +1,6 @@
 const { expect } = require('chai');
 const supertest = require('supertest');
 const { buildApp } = require('../../src/buildApp');
-const config = require('../../src/config');
-const postgres = require('../../src/db/postgres');
 
 describe('Public API Integration', () => {
   let app;
@@ -97,55 +95,29 @@ describe('Private API Integration', () => {
     });
   });
 
-  describe('launcher routes ARE present', () => {
-    it('returns JSON manifest or JSON error (route exists, never HTML 404)', async () => {
+  describe('launcher routes ARE present (deprecated)', () => {
+    it('GET /launcher-win64 returns JSON manifest or JSON error with a Deprecation header (never HTML 404)', async () => {
       const res = await supertest(app).get('/launcher-win64');
       expect(res.status).to.be.oneOf([200, 404]);
       expect(res.body).to.be.an('object');
+      expect(res.headers.deprecation).to.equal('true');
+      if (res.status === 200) {
+        expect(res.body.launcher).to.be.an('object');
+        expect(res.body.launcher.download_url).to.equal('https://milklounge.wang/tardquest');
+        expect(res.body.launcher.releases_url)
+          .to.equal('https://github.com/VocaPepper/tardquest-launcher/releases/latest');
+      }
     });
 
-    it('POST /launcher-win64 rejects when no admin accounts are configured', async () => {
+    it('POST /launcher-win64 is deprecated and returns 410 Gone', async () => {
       const res = await supertest(app)
         .post('/launcher-win64')
         .send({ operation: 'upsert_version', brand: 'test', version_entry: { version: '1.0.0' } });
-      expect(res.status).to.equal(503);
-      expect(res.body.error).to.include('admin');
-    });
-
-    describe('with a whitelisted admin configured', () => {
-      const originalAdmins = config.manifestoAdmins;
-      const originalVerify = postgres.verifyOnlineAuthToken;
-
-      before(() => {
-        config.manifestoAdmins = ['CumCzar'];
-        postgres.verifyOnlineAuthToken = async (token) => {
-          if (token === 'valid-admin-token') return { valid: true, error: null, username: 'CumCzar' };
-          if (token === 'valid-other-token') return { valid: true, error: null, username: 'SomeOther' };
-          return { valid: false, error: 'Invalid or expired token' };
-        };
-      });
-
-      after(() => {
-        config.manifestoAdmins = originalAdmins;
-        postgres.verifyOnlineAuthToken = originalVerify;
-      });
-
-      it('rejects a non-whitelisted account with 403', async () => {
-        const res = await supertest(app)
-          .post('/launcher-win64')
-          .set('Authorization', 'Bearer valid-other-token')
-          .send({ operation: 'upsert_version', brand: 'test', version_entry: { version: '1.0.0' } });
-        expect(res.status).to.equal(403);
-        expect(res.body.error).to.include('whitelisted');
-      });
-
-      it('rejects an invalid token with 401', async () => {
-        const res = await supertest(app)
-          .post('/launcher-win64')
-          .set('Authorization', 'Bearer bogus-token')
-          .send({ operation: 'upsert_version', brand: 'test', version_entry: { version: '1.0.0' } });
-        expect(res.status).to.equal(401);
-      });
+      expect(res.status).to.equal(410);
+      expect(res.body.error).to.include('deprecated');
+      expect(res.body.download_url).to.equal('https://milklounge.wang/tardquest');
+      expect(res.body.releases_url)
+        .to.equal('https://github.com/VocaPepper/tardquest-launcher/releases/latest');
     });
   });
 
