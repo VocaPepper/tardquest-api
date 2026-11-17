@@ -82,7 +82,7 @@ The server works with the committed defaults. Copy the values you need into `.en
 | `authBackoffMaxSeconds` | `300` | Maximum backoff delay |
 | `corsOrigins` | `http://localhost:3000` | Allowed CORS origin list |
 
-Rate limiting currently uses the default in-memory store from `express-rate-limit`, so limits are local to each Node process.
+Rate limiting uses the default in-memory store from `express-rate-limit`, so counters are local to each Node process. The public deployment is **single-process**, which makes per-process counters correct. If you instead run multiple processes or place instances behind a load balancer, swap in a shared store (for example a Redis-backed `express-rate-limit` store) so the limits apply across instances.
 
 ### VocaGuard Thresholds (in `vocaguard.service.js`)
 
