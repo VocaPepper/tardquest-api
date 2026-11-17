@@ -506,12 +506,16 @@ function messageWeight(msg, recipientSession) {
     weight *= config.repeatSenderPenalty;
   }
   weight *= (config.randomJitterMin + Math.random() * (config.randomJitterMax - config.randomJitterMin));
-  return Math.max(weight, 0);
+  // A non-finite weight (corrupted numeric/date field) would poison the summed
+  // totalWeight and stall the whole weighted draw — fail closed to weight 0.
+  return Number.isFinite(weight) ? Math.max(weight, 0) : 0;
 }
 
 function ageBoost(createdIso) {
   try {
-    const age = (Date.now() - new Date(createdIso).getTime()) / 1000;
+    const ts = new Date(createdIso).getTime();
+    if (!Number.isFinite(ts)) return 0;
+    const age = (Date.now() - ts) / 1000;
     if (age <= 0) return 0;
     return Math.min(config.ageBoostMax, config.ageBoostMax * (age / config.ageBoostFullSeconds));
   } catch (e) {
@@ -542,4 +546,8 @@ module.exports = {
   getPigeonMurderTotals,
   createOnlineAuthSession,
   verifyOnlineAuthToken,
+  // Exposed for tests (C3): assert the pigeon delivery weighting inputs before
+  // any tuning of the priority constants.
+  messageWeight,
+  ageBoost,
 };
