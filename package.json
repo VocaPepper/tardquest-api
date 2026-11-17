@@ -36,5 +36,10 @@
     "esbuild": "^0.28.1",
     "mocha": "^10.8.0",
     "supertest": "^7.0.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "bcrypt@6.0.0": true,
+    "esbuild@0.28.1": true
   }
 }
