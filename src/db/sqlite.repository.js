@@ -198,7 +198,7 @@ function getPendingPigeonForDelivery(recipientFloor, recipientSessionId, exclude
   try {
     const db = getDbConnection();
     const rows = db.prepare(
-      'SELECT id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to FROM pigeons WHERE delivered = 0 AND from_session != ? LIMIT 100'
+      'SELECT id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to, drawing FROM pigeons WHERE delivered = 0 AND from_session != ? LIMIT 100'
     ).all(recipientSessionId);
 
     if (rows.length === 0) return null;
@@ -211,6 +211,7 @@ function getPendingPigeonForDelivery(recipientFloor, recipientSessionId, exclude
       from_level: r.from_level,
       from_verified: !!r.from_verified,
       created: r.created,
+      drawing: safeJsonParse(r.drawing, null),
       delivered: !!r.delivered,
       delivered_at: r.delivered_at,
       delivered_to: r.delivered_to,
@@ -251,7 +252,7 @@ function claimPigeonAtomically(recipientFloor, recipientSessionId, excludeRecent
     const db = getDbConnection();
     const claim = db.transaction(() => {
       const rows = db.prepare(
-        'SELECT id, text, from_session, from_floor, from_level, from_verified, created FROM pigeons WHERE delivered = 0 AND from_session != ? LIMIT 100'
+        'SELECT id, text, from_session, from_floor, from_level, from_verified, created, drawing FROM pigeons WHERE delivered = 0 AND from_session != ? LIMIT 100'
       ).all(recipientSessionId);
 
       if (rows.length === 0) return null;
@@ -264,6 +265,7 @@ function claimPigeonAtomically(recipientFloor, recipientSessionId, excludeRecent
         from_level: r.from_level,
         from_verified: !!r.from_verified,
         created: r.created,
+        drawing: safeJsonParse(r.drawing, null),
       }));
 
       const recipientCtx = { floor: recipientFloor, last_from_session_delivered: excludeRecentSender };
@@ -354,10 +356,14 @@ function storePigeon(pigeon) {
         return { error: 'Session pigeon message limit reached' };
       }
 
-      const duplicate = db.prepare(
-        'SELECT id FROM pigeons WHERE from_session = ? AND text = ? AND delivered = 0 LIMIT 1'
-      ).get(pigeon.from_session, pigeon.text);
-      if (duplicate) return { error: 'Duplicate message' };
+      // Text dup-guard skipped for drawing-only messages (empty text would
+      // otherwise collide across all of a sender's picture-only pigeons).
+      if (pigeon.text) {
+        const duplicate = db.prepare(
+          'SELECT id FROM pigeons WHERE from_session = ? AND text = ? AND delivered = 0 LIMIT 1'
+        ).get(pigeon.from_session, pigeon.text);
+        if (duplicate) return { error: 'Duplicate message' };
+      }
 
       const newCount = carrierPigeons - 1;
       const updated = db.prepare('UPDATE sessions SET inv = ? WHERE session_id = ?').run(
@@ -367,11 +373,12 @@ function storePigeon(pigeon) {
       if (updated.changes === 0) return { error: 'Internal server error', internal: true };
 
       db.prepare(`
-        INSERT INTO pigeons (id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO pigeons (id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to, drawing)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         pigeon.id, pigeon.text, pigeon.from_session, pigeon.from_floor, pigeon.from_level,
         pigeon.from_verified ? 1 : 0, pigeon.created, 0, null, null,
+        pigeon.drawing ? JSON.stringify(pigeon.drawing) : null,
       );
 
       const queueLengthPending = db.prepare(

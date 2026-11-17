@@ -84,9 +84,10 @@ function register(app) {
     const data = req.body || {};
     const sessionId = (data.session_id || '').trim();
     const rawText = (data.message || '').trim();
+    const rawDrawing = (data.drawing !== undefined) ? data.drawing : null;
 
-    if (!sessionId || !rawText) {
-      return res.status(400).json({ error: 'session_id and message required' });
+    if (!sessionId || (!rawText && rawDrawing === null)) {
+      return res.status(400).json({ error: 'session_id and (message or drawing) required' });
     }
 
     const { flagged, info } = abuse.isFlagged(req.ip);
@@ -94,7 +95,7 @@ function register(app) {
       return res.status(429).json({ error: 'Temporarily blocked due to abuse', until: (info || {}).until });
     }
 
-    const result = pigeonService.sendPigeon(sessionId, rawText);
+    const result = pigeonService.sendPigeon(sessionId, rawText, rawDrawing);
     if (result.error) {
       if (result.internal) {
         return res.status(500).json({ error: 'Internal server error' });
@@ -105,6 +106,8 @@ function register(app) {
         result.error === 'No carrier pigeon in inventory' ? 'no_inventory' :
         result.error === 'Duplicate message' ? 'duplicate' :
         result.error === 'Session pigeon message limit reached' ? 'message_cap' :
+        result.error === 'Client too old for picture messages' ? 'drawing_unsupported' :
+        /^Drawing/.test(result.error) ? 'invalid_drawing' :
           'sanitize_reject';
       abuse.recordAbuse(metric, req.ip, sessionId, { pigeon_error: result.error });
       return res.status(400).json({ error: result.error });

@@ -72,6 +72,12 @@ The server works with the committed defaults. Copy the values you need into `.en
 | `maxPigeonMessageLen` | `420` | Max pigeon message length |
 | `maxPigeonsPerSession` | `20` | Max pigeon inventory capacity |
 | `pigeonRateLimit` | `20 per hour` | Pigeon purchase rate limit |
+| `drawingCanvasSize` | `100` | Handdrawn picture coordinate space (0–100) |
+| `drawingMaxStrokes` | `24` | Max strokes per picture message |
+| `drawingMaxPointsPerStroke` | `64` | Max points per stroke |
+| `drawingMaxColors` | `8` | Max distinct color indices (0–7) |
+| `drawingMaxPayloadBytes` | `8192` | Max serialized picture payload size |
+| `pigeonDrawingMinClientVersion` | `4.2.0` | Min client version to send/receive pictures |
 | `abuseEventWindowSeconds` | `3600` | Lookback window for abuse counting |
 | `abuseDuplicateThreshold` | `2` | Duplicate messages before flagging |
 | `abuseSanitizeRejectThreshold` | `2` | Sanitization failures before flagging |
@@ -156,15 +162,17 @@ Return the current carrier-pigeon count. Requires `X-Session-Id: <session_id>`.
 
 ### `POST /pigeon/send`
 
-Send a pigeon message. Consumes one carrier pigeon from inventory.
+Send a pigeon message. Consumes one carrier pigeon from inventory. Accepts an optional `drawing` (a handdrawn picture) alongside a caption; a send must carry a `message`, a `drawing`, or both.
 
 **Message sanitization:** NFC normalization, HTML entity/tag removal, protocol URL stripping, zero-width/control-character removal, character whitelist, length cap (420 chars), and repeated-punctuation collapse.
+
+**Handdrawn picture messages:** `drawing` is a bounded vector-stroke payload — `{ strokes: [ { c: <colorIndex>, p: [x0,y0,x1,y1,…] } ] }` on a `0–drawingCanvasSize` (default 100) coordinate grid. Coordinates must be in-range integers; strokes/points/colors are capped by `drawingMaxStrokes`, `drawingMaxPointsPerStroke`, `drawingMaxColors`, and the serialized payload must fit `drawingMaxPayloadBytes`. This is validated structurally (not through the text whitelist) and rejected fail-closed. Requires the session client to be at or above `pigeonDrawingMinClientVersion` (default `4.2.0`, compared on major.minor); older clients get `400 Client too old for picture messages`.
 
 **Rate limit:** 5 per minute.
 
 ### `POST /pigeon/delivery`
 
-Retrieve a pending pigeon message for the session. Weighted random selection (floor proximity, message age, repeat-sender penalty, jitter).
+Retrieve a pending pigeon message for the session. Weighted random selection (floor proximity, message age, repeat-sender penalty, jitter). Returns `pigeon_message` and, when the recipient's client is at or above `pigeonDrawingMinClientVersion`, `pigeon_drawing` (the picture); the drawing is stripped (`null`) for older recipients so pre-feature clients never receive one.
 
 **Rate limit:** 5 per minute.
 
