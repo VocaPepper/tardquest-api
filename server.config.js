@@ -70,9 +70,9 @@ module.exports = {
   drawingMaxPayloadBytes: 8192,    // serialized {v,strokes:[...]} upper bound
   // Only clients at/above this (major.minor) may send or receive drawings.
   // The API line is 4.1.X and picture-capable clients report 4.1, so 4.1.0 is
-  // the rendering floor: today's 4.0.2608 clients never receive a picture, and
-  // it lights up exactly when the 4.1 client ships. Override via
-  // PIGEON_DRAWING_MIN_CLIENT_VERSION to raise/lower the cutoff.
+  // the rendering floor: clients still on the 4.0.x line never receive a
+  // picture, and it lights up exactly when they update to a 4.1.X client.
+  // Override via PIGEON_DRAWING_MIN_CLIENT_VERSION to raise/lower the cutoff.
   // Must be major.minor.patch so it parses; comparison is major.minor only.
   pigeonDrawingMinClientVersion: '4.1.0',
 

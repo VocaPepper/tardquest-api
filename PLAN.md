@@ -4,7 +4,7 @@ Branch: `4.1` (cut from `4.0` @ `ef8a637`)
 Scope: **Balanced** — stabilize and harden first, then a small set of high-value
 features, plus basic release/CI process.
 
-Current baseline: `4.0.2608`. Public profile = gameplay API
+Current version: `4.1.2611` (date-styled `MAJOR.MINOR.YYMM`), cut from the `4.0.2608` baseline. Public profile = gameplay API
 (`start`, `update`, `leaderboard`, `pigeon/*`, `status`, `abuse`); private
 profile (separate repo) adds `auth` + deprecated `launcher`.
 
@@ -80,9 +80,10 @@ trust before any feature work.
   `npm test` and `npm run build` (public + private where secrets allow).
   **Blocked:** current `gh` token lacks the `workflow` scope — needs a one-line
   re-auth to add it before I can write/commit workflow files.
-- **D2. Release tagging for 4.1.** `git tag` is currently empty. Establish a
-  tag (e.g. `v4.1.0`) and align `package.json` versioning (currently date-styled
-  `4.0.2608`) with a documented scheme.
+- **D2. Release tagging for 4.1.** *Versioning resolved* — keep the date-styled
+  scheme (`MAJOR.MINOR.YYMM`); `package.json` bumped `4.0.2608` → `4.1.2611`
+  (which also drives `apiVersion` and the `minClientVersion` leaderboard gate to
+  the 4.1 line). Still open: push a `v4.1.2611` git tag.
 - **D3. Migration tooling home.** Move `tests/other/migrate-legacy-db.js` (and
   the leaderboard dedup-merge from `bf78ff7`) into a real `scripts/` folder with
   a runner + README. Keep behavior, improve discoverability.
@@ -112,8 +113,10 @@ fix `2d5f075`.
   that is already the behavior. Reopen only if a future cutoff is declared *and*
   the private repo drops the launcher implementation first.
 
-**Track D — open.** D1 blocked (`gh` token lacks the `workflow` scope). D2/D3 not
-yet started (D2 first needs a versioning decision).
+**Track D — open.** D1 blocked (`gh` token lacks the `workflow` scope). D2
+versioning *resolved* (kept the date-styled scheme; bumped `4.0.2608` →
+`4.1.2611`, which also sets `apiVersion` + the `minClientVersion` gate to the
+4.1 line); pushing a `v4.1.2611` tag is still optional. D3 not yet started.
 
 ---
 
@@ -129,5 +132,5 @@ yet started (D2 first needs a versioning decision).
 - **C1:** *Resolved* — documented single-process guarantee; no Redis added.
 - **A5:** *Resolved* — purge extended (7→30 days) to match the session TTL.
 - **C2:** *Resolved* — keep `410` + `Deprecation` indefinitely; no removal.
-- **D2:** keep date-based versioning (`4.0.2608`) or switch to semver for `4.1`?
+- **D2:** *Resolved* — kept date-based versioning; bumped `4.0.2608` → `4.1.2611`.
 - **D1:** re-auth `gh` to add the `workflow` scope now, or defer CI?

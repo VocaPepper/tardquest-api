@@ -22,7 +22,7 @@ const routes = [require('../../src/routes/pigeon.route')];
 
 const DRAWING = { strokes: [{ c: 1, p: [0, 0, 10, 10, 20, 5] }] };
 const RENDERABLE = '4.1.0';   // at the drawing floor: can render pictures
-const LEGACY = '4.0.2608';    // current release: below the floor, no rendering
+const LEGACY = '4.0.2608';    // prior 4.0 line: below the floor, can't render
 
 function seedSession(sessionId, clientVersion, carrierPigeon) {
   repo.saveSession(sessionId, {
