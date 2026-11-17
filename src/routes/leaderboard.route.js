@@ -47,14 +47,17 @@ function register(app) {
         return res.status(400).json({ error: 'VocaGuard session missing or invalid' });
       }
 
-      try {
-        if (new Date(session.expires) < new Date()) {
-          abuse.recordAbuse('session_expired', req.ip, data.session_id);
-          repo.deleteSession(data.session_id);
-          return res.status(400).json({ error: 'VocaGuard session expired' });
-        }
-      } catch (e) {
+      // Fail closed on a malformed expiry (see /update): Invalid Date never
+      // throws, so the previous try/catch let corrupted sessions pass as valid.
+      const expiresAt = new Date(session.expires);
+      if (Number.isNaN(expiresAt.getTime())) {
+        logger.logError('leaderboard_invalid_expiry', new Error('Unparseable session expiry'), { sessionId: data.session_id });
         return res.status(400).json({ error: 'Session expired' });
+      }
+      if (expiresAt < new Date()) {
+        abuse.recordAbuse('session_expired', req.ip, data.session_id);
+        repo.deleteSession(data.session_id);
+        return res.status(400).json({ error: 'VocaGuard session expired' });
       }
 
       // Legacy clients may play, but must update before leaderboard submission.

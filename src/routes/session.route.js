@@ -98,13 +98,17 @@ function register(app) {
       return res.status(400).json({ error: 'Invalid session token' });
     }
 
-    try {
-      if (new Date(session.expires) < new Date()) {
-        abuse.recordAbuse('session_expired', req.ip, sessionId);
-        repo.deleteSession(sessionId);
-        return res.status(400).json({ error: 'Session expired' });
-      }
-    } catch (e) {
+    // Fail closed on a malformed expiry: new Date() of an invalid string yields
+    // Invalid Date rather than throwing, and comparisons against it are always
+    // false — so the old try/catch let corrupted sessions pass as "not expired".
+    const expiresAt = new Date(session.expires);
+    if (Number.isNaN(expiresAt.getTime())) {
+      logger.logError('update_invalid_expiry', new Error('Unparseable session expiry'), { sessionId });
+      return res.status(400).json({ error: 'Session expired' });
+    }
+    if (expiresAt < new Date()) {
+      abuse.recordAbuse('session_expired', req.ip, sessionId);
+      repo.deleteSession(sessionId);
       return res.status(400).json({ error: 'Session expired' });
     }
 
