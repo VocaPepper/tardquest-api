@@ -60,6 +60,20 @@ module.exports = {
   randomJitterMax: 1.15,
   repeatSenderPenalty: 0.5,
 
+  // ── Pigeon drawings (handdrawn picture messages) ─────────
+  // Bounded vector strokes on a fixed canvas — never image bytes, so payloads
+  // stay tiny, stay server-validatable, and never touch the text sanitizer.
+  drawingCanvasSize: 100,          // coordinate space is 0..drawingCanvasSize
+  drawingMaxStrokes: 24,
+  drawingMaxPointsPerStroke: 64,
+  drawingMaxColors: 8,             // color index range 0..drawingMaxColors-1
+  drawingMaxPayloadBytes: 8192,    // serialized {v,strokes:[...]} upper bound
+  // Only clients at/above this (major.minor) may send or receive drawings.
+  // Set above the current release so the feature stays dark until clients add
+  // rendering; override via PIGEON_DRAWING_MIN_CLIENT_VERSION when they do.
+  // Must be major.minor.patch so it parses; comparison is major.minor only.
+  pigeonDrawingMinClientVersion: '4.2.0',
+
   // ── Abuse ────────────────────────────────────────────────
   abuseEventWindowSeconds: 3600,
   abuseDuplicateThreshold: 2,

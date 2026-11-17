@@ -64,4 +64,13 @@ function isLeaderboardEligible(clientVersion) {
   return versionGteMajorMinor(clientTuple, minLeaderboardTuple);
 }
 
-module.exports = { parseVersion, parseInteger, versionGte, versionGt, versionGteMajorMinor, validateClientVersion, isLeaderboardEligible };
+/** Whether a session's client supports handdrawn picture messages. */
+function supportsPigeonDrawing(clientVersion) {
+  const clientTuple = parseVersion(clientVersion);
+  const minTuple = parseVersion(config.pigeonDrawingMinClientVersion);
+  // Fail closed: an unknown/absent version may not use the drawing feature.
+  if (!clientTuple || !minTuple) return false;
+  return versionGteMajorMinor(clientTuple, minTuple);
+}
+
+module.exports = { parseVersion, parseInteger, versionGte, versionGt, versionGteMajorMinor, validateClientVersion, isLeaderboardEligible, supportsPigeonDrawing };

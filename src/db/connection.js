@@ -97,6 +97,12 @@ function initDb(database) {
   } catch (e) {
     // Already migrated.
   }
+
+  try {
+    database.exec('ALTER TABLE pigeons ADD COLUMN drawing TEXT DEFAULT NULL');
+  } catch (e) {
+    // Already migrated.
+  }
 }
 
 function closeDb() {

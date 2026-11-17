@@ -71,7 +71,8 @@ node.exec(`
     created TEXT NOT NULL,
     delivered INTEGER DEFAULT 0,
     delivered_at TEXT,
-    delivered_to TEXT
+    delivered_to TEXT,
+    drawing TEXT DEFAULT NULL
   );
 
   CREATE TABLE IF NOT EXISTS pigeon_murders (
