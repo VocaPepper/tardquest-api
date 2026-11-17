@@ -1,6 +1,16 @@
 const { expect } = require('chai');
 const supertest = require('supertest');
 const { buildApp } = require('../../src/buildApp');
+const fs = require('node:fs');
+const path = require('node:path');
+
+// The private profile's auth/launcher routes live in a separate repository and
+// are therefore absent from the public checkout. Run the Private API
+// Integration suite only when that tree is present; otherwise skip it (instead
+// of failing at require time) so `npm test` is runnable in both repositories.
+const hasPrivateRoutes =
+  fs.existsSync(path.join(__dirname, '../../src/private/routes/auth.route.js')) &&
+  fs.existsSync(path.join(__dirname, '../../src/private/routes/launcher.route.js'));
 
 describe('Public API Integration', () => {
   let app;
@@ -60,17 +70,26 @@ describe('Public API Integration', () => {
   });
 });
 
-describe('Private API Integration', () => {
+const privateSharedRoutes = [
+  require('../../src/routes/status.route'),
+  require('../../src/routes/session.route'),
+  require('../../src/routes/leaderboard.route'),
+  require('../../src/routes/pigeon.route'),
+  require('../../src/routes/abuse.route'),
+];
+
+// The auth/launcher requires only resolve in the private checkout; guard them so
+// the suite still loads (and skips this block) in the public repository.
+const privateRoutes = hasPrivateRoutes
+  ? [
+      ...privateSharedRoutes,
+      require('../../src/private/routes/auth.route'),
+      require('../../src/private/routes/launcher.route'),
+    ]
+  : [];
+
+(hasPrivateRoutes ? describe : describe.skip)('Private API Integration', () => {
   let app;
-  const privateRoutes = [
-    require('../../src/routes/status.route'),
-    require('../../src/routes/session.route'),
-    require('../../src/routes/leaderboard.route'),
-    require('../../src/routes/pigeon.route'),
-    require('../../src/routes/abuse.route'),
-    require('../../src/private/routes/auth.route'),
-    require('../../src/private/routes/launcher.route'),
-  ];
 
   before(() => {
     app = buildApp(privateRoutes);
