@@ -99,7 +99,7 @@ can only be verified against the private repo, which isn't in this public checko
 **Track B — done (B1–B3).** B1 `59e8756`, B2 `6837a74`, B3 tests `287c748` +
 fix `2d5f075`.
 
-**Track C — C3 done; C1 resolved by documentation; C2 deferred.**
+**Track C — done (C1–C3).** C3 implemented; C1 and C2 resolved by decision.
 - **C3 done** `1c1fb73`: `tests/unit/pigeon-weight.test.js` locks each delivery
   weight input (floor proximity, high-floor, verified, age, repeat-sender, jitter).
   It also caught and fixed a real bug — `ageBoost`/`messageWeight` returned `NaN`
@@ -107,10 +107,10 @@ fix `2d5f075`.
 - **C1 resolved** via the *documented single-process guarantee* branch (no Redis
   added), `30d9ab4`. Revisit with a shared/Redis store only if the deploy goes
   multi-process or behind a load balancer.
-- **C2 deferred:** launcher stays `410` + `Deprecation`. Removal needs (a) a
-  client-version cutoff + calendar date, and (b) the private repo to drop the
-  launcher implementation first; the public registry entry and guarded tests
-  can't be removed cleanly before that.
+- **C2 resolved** by decision: keep the `410` + `Deprecation` response
+  indefinitely — no launcher removal (and no Redis for C1). No code change, as
+  that is already the behavior. Reopen only if a future cutoff is declared *and*
+  the private repo drops the launcher implementation first.
 
 **Track D — open.** D1 blocked (`gh` token lacks the `workflow` scope). D2/D3 not
 yet started (D2 first needs a versioning decision).
@@ -128,7 +128,6 @@ yet started (D2 first needs a versioning decision).
 
 - **C1:** *Resolved* — documented single-process guarantee; no Redis added.
 - **A5:** *Resolved* — purge extended (7→30 days) to match the session TTL.
-- **C2:** *Open (deferred)* — needs a client version + calendar date for the
-  launcher removal cutoff, plus the private repo to drop launcher first.
+- **C2:** *Resolved* — keep `410` + `Deprecation` indefinitely; no removal.
 - **D2:** keep date-based versioning (`4.0.2608`) or switch to semver for `4.1`?
 - **D1:** re-auth `gh` to add the `workflow` scope now, or defer CI?
