@@ -194,12 +194,17 @@ function deleteLeaderboardEntryByName(name) {
   }
 }
 
-function getPendingPigeonForDelivery(recipientFloor, recipientSessionId, excludeRecentSender) {
+// Pool separation: a pigeon that carries a drawing (picture message) is only a
+// candidate for a recipient who can render it. When canReceiveDrawing is false
+// the query excludes every drawing-bearing row (picture-only OR captioned), so
+// an older client's pool is text-only and it can never be handed a blank or a
+// picture it cannot display.
+function getPendingPigeonForDelivery(recipientFloor, recipientSessionId, excludeRecentSender, canReceiveDrawing = true) {
   try {
     const db = getDbConnection();
     const rows = db.prepare(
-      'SELECT id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to, drawing FROM pigeons WHERE delivered = 0 AND from_session != ? LIMIT 100'
-    ).all(recipientSessionId);
+      'SELECT id, text, from_session, from_floor, from_level, from_verified, created, delivered, delivered_at, delivered_to, drawing FROM pigeons WHERE delivered = 0 AND from_session != ? AND (drawing IS NULL OR ? = 1) LIMIT 100'
+    ).all(recipientSessionId, canReceiveDrawing ? 1 : 0);
 
     if (rows.length === 0) return null;
 
@@ -247,13 +252,13 @@ function markPigeonDelivered(pigeonId, deliveredToSession) {
   }
 }
 
-function claimPigeonAtomically(recipientFloor, recipientSessionId, excludeRecentSender) {
+function claimPigeonAtomically(recipientFloor, recipientSessionId, excludeRecentSender, canReceiveDrawing = true) {
   try {
     const db = getDbConnection();
     const claim = db.transaction(() => {
       const rows = db.prepare(
-        'SELECT id, text, from_session, from_floor, from_level, from_verified, created, drawing FROM pigeons WHERE delivered = 0 AND from_session != ? LIMIT 100'
-      ).all(recipientSessionId);
+        'SELECT id, text, from_session, from_floor, from_level, from_verified, created, drawing FROM pigeons WHERE delivered = 0 AND from_session != ? AND (drawing IS NULL OR ? = 1) LIMIT 100'
+      ).all(recipientSessionId, canReceiveDrawing ? 1 : 0);
 
       if (rows.length === 0) return null;
 
@@ -310,10 +315,13 @@ function getPendingPigeonCount(sessionId) {
   }
 }
 
-function getDeliverablePigeonCount(sessionId) {
+// Count only pigeons this recipient could actually be handed — mirrors the pool
+// separation in claimPigeonAtomically so the "remaining" figure never advertises
+// a picture message the recipient's client can't render.
+function getDeliverablePigeonCount(sessionId, canReceiveDrawing = true) {
   try {
     const db = getDbConnection();
-    const row = db.prepare('SELECT COUNT(*) AS cnt FROM pigeons WHERE delivered = 0 AND from_session != ?').get(sessionId);
+    const row = db.prepare('SELECT COUNT(*) AS cnt FROM pigeons WHERE delivered = 0 AND from_session != ? AND (drawing IS NULL OR ? = 1)').get(sessionId, canReceiveDrawing ? 1 : 0);
     return row.cnt;
   } catch (e) {
     logger.logError('getDeliverablePigeonCount', e, { sessionId });

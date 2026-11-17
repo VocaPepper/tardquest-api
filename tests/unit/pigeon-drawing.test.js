@@ -80,26 +80,26 @@ describe('supportsPigeonDrawing (unit)', () => {
   let original;
   before(() => {
     original = config.pigeonDrawingMinClientVersion;
-    config.pigeonDrawingMinClientVersion = '4.2.0';
+    config.pigeonDrawingMinClientVersion = '4.1.0';
   });
   after(() => {
     config.pigeonDrawingMinClientVersion = original;
   });
 
   it('allows clients at or above the minimum (patch-insensitive)', () => {
+    expect(supportsPigeonDrawing('4.1.0')).to.equal(true);
+    expect(supportsPigeonDrawing('4.1.9')).to.equal(true);
     expect(supportsPigeonDrawing('4.2.0')).to.equal(true);
-    expect(supportsPigeonDrawing('4.2.7')).to.equal(true);
-    expect(supportsPigeonDrawing('4.9.0')).to.equal(true);
     expect(supportsPigeonDrawing('5.0.0')).to.equal(true);
   });
 
   it('denies older clients', () => {
-    expect(supportsPigeonDrawing('4.1.99')).to.equal(false);
+    expect(supportsPigeonDrawing('4.0.99')).to.equal(false);
     expect(supportsPigeonDrawing('3.0.251113')).to.equal(false);
   });
 
   it('fails closed on unknown/missing versions', () => {
-    expect(supportsPigeonDrawing('4.2')).to.equal(false);
+    expect(supportsPigeonDrawing('4.1')).to.equal(false);
     expect(supportsPigeonDrawing('garbage')).to.equal(false);
     expect(supportsPigeonDrawing(null)).to.equal(false);
     expect(supportsPigeonDrawing(undefined)).to.equal(false);

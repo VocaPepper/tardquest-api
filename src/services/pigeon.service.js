@@ -134,10 +134,16 @@ function deliverPigeon(sessionId) {
     return { error: 'Session expired' };
   }
 
+  // Pool separation: decide once whether this recipient can render a picture.
+  // The claim query then only considers pigeons it can actually display, so an
+  // older client is never handed a picture-only or captioned-picture message.
+  const canReceiveDrawing = supportsPigeonDrawing(session.client_version);
+
   let deliveredMsg = repo.claimPigeonAtomically(
     session.floor || 0,
     sessionId,
     session.last_from_session_delivered || null,
+    canReceiveDrawing,
   );
 
   if (deliveredMsg) {
@@ -147,14 +153,14 @@ function deliverPigeon(sessionId) {
     });
   }
 
-  const remaining = repo.getDeliverablePigeonCount(sessionId);
-  // Only hand back a drawing to recipients whose client can render one.
-  const mayDraw = supportsPigeonDrawing(session.client_version);
+  const remaining = repo.getDeliverablePigeonCount(sessionId, canReceiveDrawing);
+  // Defense-in-depth: the pool already excludes pictures from an older client's
+  // claim, but never hand back a drawing unless this client can render one.
   return {
     delivered: !!deliveredMsg,
     pigeon_message: deliveredMsg ? deliveredMsg.text : null,
     pigeon_id: deliveredMsg ? deliveredMsg.id : null,
-    pigeon_drawing: (deliveredMsg && mayDraw && deliveredMsg.drawing) ? deliveredMsg.drawing : null,
+    pigeon_drawing: (deliveredMsg && canReceiveDrawing && deliveredMsg.drawing) ? deliveredMsg.drawing : null,
     remaining_queue_pending: remaining,
   };
 }
