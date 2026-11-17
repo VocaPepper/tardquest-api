@@ -3,6 +3,14 @@ const config = require('../config');
 const repo = require('../db/sqlite.repository');
 const logger = require('../utils/logger');
 
+// Enforce the whitelist as a global pass: the configured pattern is not
+// global-flagged, so a single .replace would leave later runs of disallowed
+// characters intact when an allowed character separates them (e.g. "a😀b😀c").
+const DISALLOWED_RE = new RegExp(
+  config.allowedCharsPattern.source,
+  config.allowedCharsPattern.flags.includes('g') ? config.allowedCharsPattern.flags : `${config.allowedCharsPattern.flags}g`
+);
+
 function sanitizeMessage(raw) {
   if (typeof raw !== 'string') return '';
   let txt = raw.normalize('NFC');
@@ -20,7 +28,7 @@ function sanitizeMessage(raw) {
   }).join('');
   txt = txt.replace(/[ \t]+/g, ' ');
   txt = txt.replace(/\n{3,}/g, '\n\n');
-  txt = txt.replace(config.allowedCharsPattern, '');
+  txt = txt.replace(DISALLOWED_RE, '');
   if (txt.length > config.maxPigeonMessageLen) {
     txt = txt.slice(0, config.maxPigeonMessageLen);
   }

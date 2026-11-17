@@ -40,6 +40,33 @@ describe('Pigeon message sanitation (unit)', () => {
     expect(out).to.not.include('😀');
   });
 
+  it('removes disallowed characters in multiple separate runs', () => {
+    // Regression: the whitelist pass must be global, not just the first run.
+    const out = sanitizeMessage('a😀b😀😀c');
+    expect(out).to.equal('abc');
+    expect(out).to.not.include('😀');
+  });
+
+  it('removes the data:text/html scheme and nested tags', () => {
+    const out = sanitizeMessage('see data:text/html,<b>x</b>');
+    expect(out.toLowerCase()).to.not.include('data:text/html');
+    expect(out).to.not.include('<');
+    expect(out).to.equal('see ,x');
+  });
+
+  it('removes the vbscript: scheme', () => {
+    const out = sanitizeMessage('go vbscript:x');
+    expect(out.toLowerCase()).to.not.include('vbscript');
+    expect(out).to.equal('go x');
+  });
+
+  it('leaves no live markup after double-encoded entities', () => {
+    const out = sanitizeMessage('&amp;lt;img src&amp;gt;hi');
+    expect(out).to.not.include('<');
+    expect(out).to.not.include('>');
+    expect(out).to.include('hi');
+  });
+
   it('truncates to maxPigeonMessageLen', () => {
     const out = sanitizeMessage('a'.repeat(config.maxPigeonMessageLen + 80));
     expect(out.length).to.equal(config.maxPigeonMessageLen);
