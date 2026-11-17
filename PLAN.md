@@ -89,6 +89,34 @@ trust before any feature work.
 
 ---
 
+## Status (updated during 4.1 work)
+
+**Track A — done (A1–A5); A6 deferred.** A1 `2685eb6`, A2 `d4408c6`, A3 `34c5d64`,
+A4 `995a7a5`, A5 `d656301`. A5 resolved as *extend the purge age (7→30 days) to
+match the 30-day session timeout*. **A6 deferred:** the `dev:private` entry path
+can only be verified against the private repo, which isn't in this public checkout.
+
+**Track B — done (B1–B3).** B1 `59e8756`, B2 `6837a74`, B3 tests `287c748` +
+fix `2d5f075`.
+
+**Track C — C3 done; C1 resolved by documentation; C2 deferred.**
+- **C3 done** `1c1fb73`: `tests/unit/pigeon-weight.test.js` locks each delivery
+  weight input (floor proximity, high-floor, verified, age, repeat-sender, jitter).
+  It also caught and fixed a real bug — `ageBoost`/`messageWeight` returned `NaN`
+  for a corrupted date, which would stall the whole weighted draw.
+- **C1 resolved** via the *documented single-process guarantee* branch (no Redis
+  added), `30d9ab4`. Revisit with a shared/Redis store only if the deploy goes
+  multi-process or behind a load balancer.
+- **C2 deferred:** launcher stays `410` + `Deprecation`. Removal needs (a) a
+  client-version cutoff + calendar date, and (b) the private repo to drop the
+  launcher implementation first; the public registry entry and guarded tests
+  can't be removed cleanly before that.
+
+**Track D — open.** D1 blocked (`gh` token lacks the `workflow` scope). D2/D3 not
+yet started (D2 first needs a versioning decision).
+
+---
+
 ## Suggested execution order
 
 1. **A1–A6** (stabilization) — safe, isolated, ships first.
@@ -98,8 +126,9 @@ trust before any feature work.
 
 ## Open decisions before coding
 
-- **C1:** Redis dependency vs. documented single-process limit?
-- **A5:** session TTL capped to 7-day purge, or purge extended to match TTL?
-- **C2:** client version + calendar date for launcher removal cutoff?
+- **C1:** *Resolved* — documented single-process guarantee; no Redis added.
+- **A5:** *Resolved* — purge extended (7→30 days) to match the session TTL.
+- **C2:** *Open (deferred)* — needs a client version + calendar date for the
+  launcher removal cutoff, plus the private repo to drop launcher first.
 - **D2:** keep date-based versioning (`4.0.2608`) or switch to semver for `4.1`?
 - **D1:** re-auth `gh` to add the `workflow` scope now, or defer CI?
