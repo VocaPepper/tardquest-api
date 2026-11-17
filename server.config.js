@@ -32,7 +32,11 @@ module.exports = {
 
   // ── Session ──────────────────────────────────────────────
   sessionTimeoutMinutes: 43200,
-  sessionPurgeAgeDays: 7,
+  // Purge sessions created more than this many days ago (keyed on created_at, an
+  // absolute age cap). Kept in step with the 30-day session TTL
+  // (sessionTimeoutMinutes, the idle window that refreshes on activity) so rows
+  // are no longer deleted ~4x before their expiry could ever apply.
+  sessionPurgeAgeDays: 30,
   backgroundWorkerSleepSeconds: 86400,
 
   // ── VocaGuard ────────────────────────────────────────────

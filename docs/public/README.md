@@ -66,7 +66,7 @@ The server works with the committed defaults. Copy the values you need into `.en
 | `enableVocaguard` | `true` | Master switch for anti-cheat |
 | `powDifficultyPrefixZeros` | `4` | Leading zero hexadecimal characters required (1–8) |
 | `sessionTimeoutMinutes` | `43200` | Game session TTL (30 days) |
-| `sessionPurgeAgeDays` | `7` | Purge sessions older than this |
+| `sessionPurgeAgeDays` | `30` | Purge sessions created over this many days ago (matches the 30-day session TTL) |
 | `backgroundWorkerSleepSeconds` | `86400` | Interval between purge runs (24h) |
 | `maxLeaderboardNameLength` | `5` | Max in-game leaderboard name length |
 | `maxPigeonMessageLen` | `420` | Max pigeon message length |
