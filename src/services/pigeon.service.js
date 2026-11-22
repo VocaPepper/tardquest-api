@@ -62,10 +62,11 @@ function validateDrawing(raw) {
       if (!Number.isInteger(n) || n < 0 || n > canvas) return { error: 'Drawing point out of canvas bounds' };
       cleanPts.push(n);
     }
-    cleanStrokes.push({ c: s.c, p: cleanPts });
+    if (!Number.isFinite(s.w) || s.w < config.drawingMinWidth || s.w > config.drawingMaxWidth) return { error: 'Invalid drawing stroke width' };
+    cleanStrokes.push({ c: s.c, p: cleanPts, w: s.w });
   }
 
-  const drawing = { v: 1, strokes: cleanStrokes };
+  const drawing = { v: 2, strokes: cleanStrokes };
   if (JSON.stringify(drawing).length > config.drawingMaxPayloadBytes) return { error: 'Drawing payload too large' };
   return { drawing };
 }

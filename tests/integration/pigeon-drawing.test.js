@@ -20,7 +20,7 @@ const config = require('../../src/config');
 // tests and each first-delivery assertion sees only its own pigeons.
 const routes = [require('../../src/routes/pigeon.route')];
 
-const DRAWING = { strokes: [{ c: 1, p: [0, 0, 10, 10, 20, 5] }] };
+const DRAWING = { strokes: [{ c: 1, w: 1.5, p: [0, 0, 10, 10, 20, 5] }] };
 const RENDERABLE = '4.1.0';   // at the drawing floor: can render pictures
 const LEGACY = '4.0.2608';    // prior 4.0 line: below the floor, can't render
 
@@ -75,7 +75,7 @@ describe('pigeon drawing messages (integration)', () => {
     expect(del.status).to.equal(200);
     expect(del.body.delivered).to.equal(true);
     expect(del.body.pigeon_message).to.equal('hello there');
-    expect(del.body.pigeon_drawing).to.deep.equal({ v: 1, strokes: [{ c: 1, p: [0, 0, 10, 10, 20, 5] }] });
+    expect(del.body.pigeon_drawing).to.deep.equal({ v: 2, strokes: [{ c: 1, p: [0, 0, 10, 10, 20, 5], w: 1.5 }] });
   });
 
   it('accepts a drawing-only send (empty caption) from a capable client', async () => {
@@ -127,7 +127,7 @@ describe('pigeon drawing messages (integration)', () => {
     const fresh = await deliver(app, newRecipient);
     expect(fresh.body.delivered).to.equal(true);
     expect(fresh.body.pigeon_message).to.equal('look at this');
-    expect(fresh.body.pigeon_drawing).to.deep.equal({ v: 1, strokes: [{ c: 1, p: [0, 0, 10, 10, 20, 5] }] });
+    expect(fresh.body.pigeon_drawing).to.deep.equal({ v: 2, strokes: [{ c: 1, p: [0, 0, 10, 10, 20, 5], w: 1.5 }] });
   });
 
   it('holds a picture-only pigeon for a capable recipient, not an old one', async () => {

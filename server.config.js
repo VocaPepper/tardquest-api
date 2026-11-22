@@ -64,10 +64,12 @@ module.exports = {
   // Bounded vector strokes on a fixed canvas — never image bytes, so payloads
   // stay tiny, stay server-validatable, and never touch the text sanitizer.
   drawingCanvasSize: 100,          // coordinate space is 0..drawingCanvasSize
-  drawingMaxStrokes: 24,
+  drawingMaxStrokes: 64,
   drawingMaxPointsPerStroke: 64,
   drawingMaxColors: 8,             // color index range 0..drawingMaxColors-1
   drawingMaxPayloadBytes: 8192,    // serialized {v,strokes:[...]} upper bound
+  drawingMinWidth: 1,              // v:2 per-stroke line width; inclusive bounds
+  drawingMaxWidth: 3,              // mirrors the client composer's WIDTHS range
   // Only clients at/above this (major.minor) may send or receive drawings.
   // The API line is 4.1.X and picture-capable clients report 4.1, so 4.1.0 is
   // the rendering floor: clients still on the 4.0.x line never receive a

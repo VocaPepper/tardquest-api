@@ -13,10 +13,10 @@ describe('pigeon drawing validation (unit)', () => {
     expect(validateDrawing(undefined)).to.deep.equal({ drawing: null });
   });
 
-  it('normalizes a valid drawing and stamps v:1', () => {
-    const out = validateDrawing({ v: 99, strokes: [{ c: 0, p: [0, 0, 100, 100] }] });
+  it('normalizes a valid drawing and stamps v:2', () => {
+    const out = validateDrawing({ v: 99, strokes: [{ c: 0, w: 1.5, p: [0, 0, 100, 100] }] });
     expect(out.error).to.equal(undefined);
-    expect(out.drawing).to.deep.equal({ v: 1, strokes: [{ c: 0, p: [0, 0, 100, 100] }] });
+    expect(out.drawing).to.deep.equal({ v: 2, strokes: [{ c: 0, p: [0, 0, 100, 100], w: 1.5 }] });
   });
 
   it('rejects a non-object payload', () => {
@@ -64,14 +64,38 @@ describe('pigeon drawing validation (unit)', () => {
     expect(validateDrawing({ strokes: [{ c: 0, p: [0, 0, config.drawingCanvasSize + 1, 1] }] }).error).to.equal('Drawing point out of canvas bounds');
     expect(validateDrawing({ strokes: [{ c: 0, p: [0, 1.5, 1, 1] }] }).error).to.equal('Drawing point out of canvas bounds');
     // upper bound is inclusive: canvas-size itself is allowed
-    expect(validateDrawing({ strokes: [{ c: 0, p: [0, 0, config.drawingCanvasSize, config.drawingCanvasSize] }] }).drawing).to.not.equal(undefined);
+    expect(validateDrawing({ strokes: [{ c: 0, w: 1.5, p: [0, 0, config.drawingCanvasSize, config.drawingCanvasSize] }] }).drawing).to.not.equal(undefined);
+  });
+
+  it('preserves a per-stroke width and stamps v:2', () => {
+    const out = validateDrawing({ v: 2, strokes: [{ c: 0, w: 3, p: [0, 0, 10, 10] }] });
+    expect(out.error).to.equal(undefined);
+    expect(out.drawing).to.deep.equal({ v: 2, strokes: [{ c: 0, p: [0, 0, 10, 10], w: 3 }] });
+  });
+
+  it('allows fractional widths within the inclusive bounds', () => {
+    expect(validateDrawing({ strokes: [{ c: 0, w: config.drawingMinWidth, p: [0, 0, 1, 1] }] }).drawing.strokes[0].w).to.equal(config.drawingMinWidth);
+    expect(validateDrawing({ strokes: [{ c: 0, w: 1.5, p: [0, 0, 1, 1] }] }).drawing.v).to.equal(2);
+    expect(validateDrawing({ strokes: [{ c: 0, w: config.drawingMaxWidth, p: [0, 0, 1, 1] }] }).drawing.strokes[0].w).to.equal(config.drawingMaxWidth);
+  });
+
+  it('requires a per-stroke width on every stroke', () => {
+    expect(validateDrawing({ v: 1, strokes: [{ c: 0, p: [0, 0, 10, 10] }] }).error)
+      .to.equal('Invalid drawing stroke width');
+  });
+
+  it('rejects out-of-bounds or non-numeric widths', () => {
+    expect(validateDrawing({ strokes: [{ c: 0, w: config.drawingMinWidth - 1, p: [0, 0, 1, 1] }] }).error).to.equal('Invalid drawing stroke width');
+    expect(validateDrawing({ strokes: [{ c: 0, w: config.drawingMaxWidth + 0.5, p: [0, 0, 1, 1] }] }).error).to.equal('Invalid drawing stroke width');
+    expect(validateDrawing({ strokes: [{ c: 0, w: '2', p: [0, 0, 1, 1] }] }).error).to.equal('Invalid drawing stroke width');
+    expect(validateDrawing({ strokes: [{ c: 0, w: NaN, p: [0, 0, 1, 1] }] }).error).to.equal('Invalid drawing stroke width');
   });
 
   it('rejects when the serialized payload exceeds the byte cap', () => {
     // Max strokes x max points with the largest 3-digit coordinate overflows
     // the small byte cap even though every structural bound is respected.
     const p = Array.from({ length: config.drawingMaxPointsPerStroke * 2 }, () => config.drawingCanvasSize);
-    const strokes = Array.from({ length: config.drawingMaxStrokes }, () => ({ c: 7, p }));
+    const strokes = Array.from({ length: config.drawingMaxStrokes }, () => ({ c: 7, w: config.drawingMaxWidth, p }));
     expect(validateDrawing({ strokes }).error).to.equal('Drawing payload too large');
   });
 });
