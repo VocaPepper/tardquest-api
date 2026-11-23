@@ -150,6 +150,19 @@ Submit a leaderboard entry. Validates progress against VocaGuard session and ver
 
 Guest names are limited to five alphanumeric characters or spaces.
 
+**Name rejections are retryable.** A guest submission with an invalid name returns `400` with machine-readable fields instead of costing the player the run:
+
+| Field | Meaning |
+|-------|---------|
+| `error` | Human-readable message |
+| `error_code` | `name_required`, `name_invalid`, `name_too_long`, or `name_reserved` |
+| `retry_allowed` | `true` — prompt for a new name and resubmit; the score is not lost |
+| `max_length` | Included on `name_too_long`; the maximum guest name length (`maxLeaderboardNameLength`) |
+
+Guest name validation runs **before** the PoW proof is verified, so a rejected name does not consume the solved challenge: the client can retry on the same session with the same `challenge_id`/`challenge_proof` and just a new `name`. Name rejections never record abuse metrics, so retrying repeatedly cannot get the IP flagged or blocked.
+
+`name_reserved` covers two cases: the name matches a **registered account** (checked against the account service), or it collides case-insensitively with a leaderboard entry **owned by an account** (tracked via the `account_username` column in SQLite). If the account service is unavailable, the registered-account check **fails open** — guests can still submit and keep their score — while the local account-owned-entry protection still applies.
+
 ### `POST /pigeon/purchase`
 
 Purchase a carrier pigeon. Limited to `maxPigeonsPerSession` (default 20).
@@ -203,7 +216,7 @@ The public gameplay profile uses **SQLite** via `better-sqlite3`:
 | `pigeons` | Player-to-player messages and delivery state |
 | `pigeon_murders` | Pigeon murder reports |
 
-The database and tables are created at startup with `CREATE TABLE IF NOT EXISTS`. Existing `sessions` tables receive the `client_version` and `died_at` columns when needed.
+The database and tables are created at startup with `CREATE TABLE IF NOT EXISTS`. Existing `sessions` tables receive the `client_version` and `died_at` columns when needed, and existing `leaderboard` tables receive the `account_username` column, which marks entries submitted by authenticated accounts so guest submissions cannot overwrite them.
 
 **Pragmas:** `journal_mode = WAL`, `synchronous = NORMAL`, `foreign_keys = ON`
 

@@ -148,17 +148,26 @@ function getLeaderboard() {
   }
 }
 
-function submitLeaderboardEntry(name, floor, level) {
+// accountUsername stamps ownership: rows written by an authenticated session
+// are marked, and a guest submission colliding (case-insensitive) with an
+// account-owned row is rejected with { conflict: 'account_owned' } instead of
+// silently merging. Guest-vs-guest merges are unchanged. Returns the
+// leaderboard array on success, null on a DB error.
+function submitLeaderboardEntry(name, floor, level, accountUsername = null) {
   try {
     const db = getDbConnection();
 
     const safeName = (name || '').slice(0, 256);
+    const account = accountUsername || null;
 
     const existing = db.prepare(
-      'SELECT id, floor, level FROM leaderboard WHERE UPPER(name) = UPPER(?) ORDER BY id ASC'
+      'SELECT id, floor, level, account_username FROM leaderboard WHERE UPPER(name) = UPPER(?) ORDER BY id ASC'
     ).all(safeName);
 
     if (existing.length > 0) {
+      if (!account && existing.some(row => row.account_username)) {
+        return { conflict: 'account_owned' };
+      }
       const keepId = existing[0].id;
       let bestFloor = floor;
       let bestLevel = level;
@@ -168,18 +177,36 @@ function submitLeaderboardEntry(name, floor, level) {
           bestLevel = row.level;
         }
       }
-      db.prepare('UPDATE leaderboard SET name = ?, floor = ?, level = ? WHERE id = ?').run(safeName, bestFloor, bestLevel, keepId);
+      db.prepare('UPDATE leaderboard SET name = ?, floor = ?, level = ?, account_username = ? WHERE id = ?').run(safeName, bestFloor, bestLevel, account, keepId);
       const idsToRemove = existing.slice(1).map(r => r.id);
       for (const id of idsToRemove) {
         db.prepare('DELETE FROM leaderboard WHERE id = ?').run(id);
       }
     } else {
-      db.prepare('INSERT INTO leaderboard (name, floor, level) VALUES (?, ?, ?)').run(safeName, floor, level);
+      db.prepare('INSERT INTO leaderboard (name, floor, level, account_username) VALUES (?, ?, ?, ?)').run(safeName, floor, level, account);
     }
     return getLeaderboard();
   } catch (e) {
     logger.logError('submitLeaderboardEntry', e, { name, floor, level });
     return null;
+  }
+}
+
+// Whether an account-owned leaderboard row already holds this name
+// (case-insensitive). Used to reject guest squatters before a PoW challenge
+// is spent. Fails open on a DB error, consistent with the reserved-name
+// decision in leaderboard.service.
+function leaderboardNameOwnedByAccount(name) {
+  try {
+    const db = getDbConnection();
+    const safeName = (name || '').slice(0, 256);
+    const row = db.prepare(
+      'SELECT 1 FROM leaderboard WHERE UPPER(name) = UPPER(?) AND account_username IS NOT NULL LIMIT 1'
+    ).get(safeName);
+    return !!row;
+  } catch (e) {
+    logger.logError('leaderboardNameOwnedByAccount', e, { name });
+    return false;
   }
 }
 
@@ -547,6 +574,7 @@ module.exports = {
   purgeOldSessions,
   getLeaderboard,
   submitLeaderboardEntry,
+  leaderboardNameOwnedByAccount,
   deleteLeaderboardEntryByName,
   getPendingPigeonForDelivery,
   markPigeonDelivered,

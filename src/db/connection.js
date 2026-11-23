@@ -28,7 +28,8 @@ function initDb(database) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       floor INTEGER NOT NULL,
-      level INTEGER NOT NULL
+      level INTEGER NOT NULL,
+      account_username TEXT DEFAULT NULL
     );
 
     CREATE TABLE IF NOT EXISTS sessions (
@@ -100,6 +101,12 @@ function initDb(database) {
 
   try {
     database.exec('ALTER TABLE pigeons ADD COLUMN drawing TEXT DEFAULT NULL');
+  } catch (e) {
+    // Already migrated.
+  }
+
+  try {
+    database.exec('ALTER TABLE leaderboard ADD COLUMN account_username TEXT DEFAULT NULL');
   } catch (e) {
     // Already migrated.
   }

@@ -70,6 +70,17 @@ function register(app) {
         });
       }
 
+      // Guest name checks run before the PoW challenge is verified so a
+      // rejected name never consumes the solved challenge: the session,
+      // floor/level, and challenge all stay intact for an immediate retry
+      // with a new name.
+      if (!session.username) {
+        const nameCheck = await leaderboardService.validateGuestName(data.name);
+        if (nameCheck.error) {
+          return res.status(400).json(nameCheck);
+        }
+      }
+
       if (config.enableVocaguard) {
         const vResult = validator.validateSubmission(
           session.floor, session.level,
@@ -112,16 +123,23 @@ function register(app) {
         session, data.name, submittedFloor, submittedLevel,
       );
       if (result.error) {
+        // Carry the structured fields (error_code, retry_allowed, max_length)
+        // through to the client so a rejected name can be retried on the same
+        // session instead of being treated as a lost score.
+        const errorPayload = { error: result.error };
+        if (result.error_code !== undefined) errorPayload.error_code = result.error_code;
+        if (result.retry_allowed !== undefined) errorPayload.retry_allowed = result.retry_allowed;
+        if (result.max_length !== undefined) errorPayload.max_length = result.max_length;
         if (!session.username && config.enableVocaguard) {
           const challenge = validator.generateChallenge(data.session_id);
           return res.status(400).json({
-            error: result.error,
+            ...errorPayload,
             challenge_id: challenge.challengeId,
             challenge_salt: challenge.challengeSalt,
             challenge_difficulty: config.powDifficultyPrefixZeros,
           });
         }
-        return res.status(400).json({ error: result.error });
+        return res.status(400).json(errorPayload);
       }
       if (!session.username) repo.deleteSession(data.session_id);
       res.json({ message: 'Leaderboard updated successfully', data: result.data });

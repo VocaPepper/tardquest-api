@@ -46,6 +46,38 @@ function getLeaderboard() {
   return cleaned;
 }
 
+// Guest name validation, usable on its own before a PoW challenge is consumed.
+// Returns { name: filteredName } on success, or a structured error object
+// (error_code, retry_allowed, max_length) so clients can prompt for a new
+// name on the same session instead of treating the rejection as a lost score.
+async function validateGuestName(name) {
+  const filteredName = name ? cleanHtml(name).trim() : '';
+  if (!filteredName) return { error: 'Name is required and must be valid', error_code: 'name_required', retry_allowed: true };
+  if (/[^A-Za-z0-9 ]/.test(filteredName)) return { error: 'Name contains invalid characters', error_code: 'name_invalid', retry_allowed: true };
+  if (filteredName.length > config.maxLeaderboardNameLength) {
+    return {
+      error: `Name must be at most ${config.maxLeaderboardNameLength} characters`,
+      error_code: 'name_too_long',
+      max_length: config.maxLeaderboardNameLength,
+      retry_allowed: true,
+    };
+  }
+  // Local ownership check first: cheap, and rejects squatters of
+  // account-owned leaderboard rows before any PoW challenge is spent.
+  if (repo.leaderboardNameOwnedByAccount(filteredName)) {
+    return { error: 'This name is reserved by a registered account', error_code: 'name_reserved', retry_allowed: true };
+  }
+  const { exists, error: lookupError } = await postgres.usernameExists(filteredName);
+  if (exists === true) return { error: 'This name is reserved by a registered account', error_code: 'name_reserved', retry_allowed: true };
+  if (lookupError) {
+    // Decision: fail OPEN when the account service is unavailable, so guests
+    // keep their score and can submit; the account_username marker on local
+    // leaderboard rows still blocks overwriting account-owned entries.
+    logger.logError('leaderboard_username_lookup_unavailable', new Error(lookupError), { name: filteredName });
+  }
+  return { name: filteredName };
+}
+
 async function submitScore(session, name, floor, level) {
   const accountUsername = session.username || null;
 
@@ -53,17 +85,17 @@ async function submitScore(session, name, floor, level) {
   if (accountUsername) {
     filteredName = accountUsername.replace(/[^A-Za-z0-9_ ]/g, '').slice(0, config.maxAccountLeaderboardNameLength);
   } else {
-    filteredName = name ? cleanHtml(name).trim() : '';
-    if (!filteredName) return { error: 'Name is required and must be valid' };
-    if (/[^A-Za-z0-9 ]/.test(filteredName)) return { error: 'Name contains invalid characters' };
-    if (filteredName.length > config.maxLeaderboardNameLength) {
-      return { error: `Name must be at most ${config.maxLeaderboardNameLength} characters` };
-    }
-    const { exists } = await postgres.usernameExists(filteredName);
-    if (exists) return { error: 'This name is reserved by a registered account' };
+    const nameCheck = await validateGuestName(name);
+    if (nameCheck.error) return nameCheck;
+    filteredName = nameCheck.name;
   }
 
-  const result = repo.submitLeaderboardEntry(filteredName, floor, level);
+  const result = repo.submitLeaderboardEntry(filteredName, floor, level, accountUsername);
+  if (result && result.conflict === 'account_owned') {
+    // Local backstop: a guest cannot take a name held by an account-owned
+    // leaderboard row even when the account service check above failed open.
+    return { error: 'This name is reserved by a registered account', error_code: 'name_reserved', retry_allowed: true };
+  }
   if (!result) return { error: 'Internal server error' };
   return { data: result };
 }
@@ -76,4 +108,4 @@ function removeAccountEntry(username) {
   return removed ? { removed: true } : { removed: false };
 }
 
-module.exports = { getLeaderboard, submitScore, removeAccountEntry, cleanHtml, cleanJson };
+module.exports = { getLeaderboard, submitScore, validateGuestName, removeAccountEntry, cleanHtml, cleanJson };
